@@ -22,6 +22,13 @@
  we make sure that we immediately transition back to (255,1) before
  executing any further logic.
 
+ Always have to be careful with lookup tables, since the cache hit can
+ be worse than the calculations it is saving. However, in the case
+ of the probability calculation, it is saving a divide or table based
+ multiply by the reciprocal, which is also a lookup table of similar size.
+
+ The normalization is a 256 byte lookup table, so it shouldn't have any
+ horrible cache implications.
 */
 pub struct Branch {
     counts: u16,
