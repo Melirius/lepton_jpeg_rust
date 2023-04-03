@@ -13,7 +13,7 @@ use crate::structs::model::*;
 use crate::structs::quantization_tables::*;
 use std::cmp::{max, min};
 
-use super::block_based_image::BlockBasedImage;
+use super::block_based_image::AlignedBlock;
 use super::block_context::BlockContext;
 use super::neighbor_summary::NeighborSummary;
 use super::probability_tables_coefficient_context::ProbabilityTablesCoefficientContext;
@@ -24,7 +24,7 @@ pub struct ProbabilityTables {
     left_present: bool,
     above_present: bool,
     all_present: bool,
-    color: usize,
+    color_index: usize,
 }
 
 pub struct PredictDCResult {
@@ -40,7 +40,7 @@ impl ProbabilityTables {
             left_present: in_left_present,
             above_present: in_above_present,
             all_present: in_left_present && in_above_present,
-            color: kcolor,
+            color_index: if kcolor == 0 { 0 } else { 1 },
         };
     }
 
@@ -78,7 +78,7 @@ impl ProbabilityTables {
     }
 
     pub fn get_color_index(&self) -> usize {
-        return if self.color == 0 { 0 } else { 1 };
+        self.color_index
     }
 
     pub fn num_non_zeros_to_bin(num_non_zeros: u8) -> u8 {
@@ -119,16 +119,13 @@ impl ProbabilityTables {
     #[inline(never)]
     pub fn calc_coefficient_context_7x7_aavg_block<const ALL_PRESENT: bool>(
         &self,
-        image_data: &BlockBasedImage,
-        block_context: &BlockContext,
+        above: &[i16; 64],
+        left: &[i16; 64],
+        above_left: &[i16; 64],
     ) -> [i16; 49] {
         let mut best_prior = [0; 49];
 
         if ALL_PRESENT {
-            let left = block_context.left(image_data).get_block();
-            let above = block_context.above(image_data).get_block();
-            let above_left = block_context.above_left(image_data).get_block();
-
             // compiler does a pretty amazing job with SSE/AVX2 here
             for i in 0..49 {
                 // approximate average of 3 without a divide with double the weight for left/top vs diagonal
@@ -140,12 +137,10 @@ impl ProbabilityTables {
             // handle edge case :) where we are on the top or left edge
 
             if self.left_present {
-                let left = block_context.left(image_data).get_block();
                 for i in 0..49 {
                     best_prior[i] = left[i].abs();
                 }
             } else if self.above_present {
-                let above = block_context.above(image_data).get_block();
                 for i in 0..49 {
                     best_prior[i] = above[i].abs();
                 }
@@ -249,7 +244,7 @@ impl ProbabilityTables {
 
     pub fn adv_predict_dc_pix<const ALL_PRESENT: bool>(
         &self,
-        image_data: &BlockBasedImage,
+        here: &AlignedBlock,
         qt: &QuantizationTables,
         block_context: &BlockContext,
         num_non_zeros: &[NeighborSummary],
@@ -262,7 +257,7 @@ impl ProbabilityTables {
 
         let mut avgmed = 0;
 
-        run_idct::<true>(block_context.here(image_data), q, &mut pixels_sans_dc);
+        run_idct::<true>(here, q, &mut pixels_sans_dc);
 
         if ALL_PRESENT || self.left_present || self.above_present {
             let mut min_dc = i16::MAX;

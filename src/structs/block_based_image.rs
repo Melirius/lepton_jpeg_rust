@@ -165,6 +165,66 @@ impl BlockBasedImage {
         self.fill_up_to_dpos(dpos);
         return &mut self.image[(dpos - self.dpos_offset) as usize];
     }
+
+    #[inline(always)]
+    pub fn get_blocks_mut(
+        &mut self,
+        above: i32,
+        left: i32,
+        above_left: i32,
+        here: i32,
+    ) -> (&[i16; 64], &[i16; 64], &[i16; 64], &mut AlignedBlock) {
+        self.fill_up_to_dpos(here);
+
+        let (first, rest) = self.image.split_at_mut((here - self.dpos_offset) as usize);
+
+        return (
+            if above == -1 {
+                &EMPTY.get_block()
+            } else {
+                &first[(above - self.dpos_offset) as usize].get_block()
+            },
+            if left == -1 {
+                &EMPTY.get_block()
+            } else {
+                &first[(left - self.dpos_offset) as usize].get_block()
+            },
+            if above_left == -1 {
+                &EMPTY.get_block()
+            } else {
+                &first[(above_left - self.dpos_offset) as usize].get_block()
+            },
+            &mut rest[0],
+        );
+    }
+
+    #[inline(always)]
+    pub fn get_blocks(
+        &self,
+        above: i32,
+        left: i32,
+        above_left: i32,
+        here: i32,
+    ) -> (&[i16; 64], &[i16; 64], &[i16; 64], &AlignedBlock) {
+        return (
+            if above == -1 {
+                &EMPTY.get_block()
+            } else {
+                &self.image[(above - self.dpos_offset) as usize].get_block()
+            },
+            if left == -1 {
+                &EMPTY.get_block()
+            } else {
+                &self.image[(left - self.dpos_offset) as usize].get_block()
+            },
+            if above_left == -1 {
+                &EMPTY.get_block()
+            } else {
+                &self.image[(above_left - self.dpos_offset) as usize].get_block()
+            },
+            &self.image[(here - self.dpos_offset) as usize],
+        );
+    }
 }
 
 /// block of 64 coefficients in the aligned order, which is similar to zigzag except that the 7x7 lower right square comes first,

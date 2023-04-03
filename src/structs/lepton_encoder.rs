@@ -23,6 +23,8 @@ use crate::structs::{
 
 use default_boxed::DefaultBoxed;
 
+use super::block_based_image::AlignedBlock;
+
 #[inline(never)] // don't inline so that the profiler can get proper data
 pub fn lepton_encode_row_range<W: Write>(
     pts: &ProbabilityTablesSet,
@@ -302,8 +304,6 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     let mut eob_y = 0;
     let mut num_non_zeros_left_7x7 = num_non_zeros_7x7;
 
-    let block = context.here(image_data);
-
     #[cfg(feature = "detailed_tracing")]
     trace!(
         "block {0}:{1:x}",
@@ -311,8 +311,11 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
         block.get_hash()
     );
 
+    let (above, left, above_left, block) =
+        context.get_blocks(image_data, pt.is_left_present(), pt.is_above_present());
+
     let best_priors =
-        pt.calc_coefficient_context_7x7_aavg_block::<ALL_PRESENT>(image_data, context);
+        pt.calc_coefficient_context_7x7_aavg_block::<ALL_PRESENT>(above, left, above_left);
 
     for zig49 in 0..49 {
         if num_non_zeros_left_7x7 == 0 {
@@ -351,8 +354,9 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     }
 
     encode_edge::<W, ALL_PRESENT>(
-        context,
-        image_data,
+        &above,
+        &left,
+        block,
         model,
         bool_writer,
         qt,
@@ -363,8 +367,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     )
     .context(here!())?;
 
-    let predicted_val =
-        pt.adv_predict_dc_pix::<ALL_PRESENT>(image_data, qt, context, &num_non_zeros);
+    let predicted_val = pt.adv_predict_dc_pix::<ALL_PRESENT>(block, qt, context, &num_non_zeros);
 
     let avg_predicted_dc = ProbabilityTables::adv_predict_or_unpredict_dc(
         block.get_dc(),
@@ -412,8 +415,9 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 fn encode_edge<W: Write, const ALL_PRESENT: bool>(
-    context: &BlockContext,
-    image_data: &BlockBasedImage,
+    above: &[i16; 64],
+    left: &[i16; 64],
+    here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
     qt: &QuantizationTables,
@@ -423,8 +427,9 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
     eob_y: u8,
 ) -> Result<()> {
     encode_one_edge::<W, ALL_PRESENT, true>(
-        context,
-        image_data,
+        above,
+        left,
+        here,
         model,
         bool_writer,
         qt,
@@ -434,8 +439,9 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
     )
     .context(here!())?;
     encode_one_edge::<W, ALL_PRESENT, false>(
-        context,
-        image_data,
+        above,
+        left,
+        here,
         model,
         bool_writer,
         qt,
@@ -456,8 +462,9 @@ fn count_non_zero(v: i16) -> u8 {
 }
 
 fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
-    block_context: &BlockContext,
-    image_data: &BlockBasedImage,
+    above: &[i16; 64],
+    left: &[i16; 64],
+    here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
     qt: &QuantizationTables,
@@ -465,26 +472,24 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
     num_non_zeros_7x7: u8,
     est_eob: u8,
 ) -> Result<()> {
-    let block = block_context.here(image_data);
-
     let mut num_non_zeros_edge;
 
     if HORIZONTAL {
-        num_non_zeros_edge = count_non_zero(block.get_coefficient_raster(1))
-            + count_non_zero(block.get_coefficient_raster(2))
-            + count_non_zero(block.get_coefficient_raster(3))
-            + count_non_zero(block.get_coefficient_raster(4))
-            + count_non_zero(block.get_coefficient_raster(5))
-            + count_non_zero(block.get_coefficient_raster(6))
-            + count_non_zero(block.get_coefficient_raster(7));
+        num_non_zeros_edge = count_non_zero(here.get_coefficient_raster(1))
+            + count_non_zero(here.get_coefficient_raster(2))
+            + count_non_zero(here.get_coefficient_raster(3))
+            + count_non_zero(here.get_coefficient_raster(4))
+            + count_non_zero(here.get_coefficient_raster(5))
+            + count_non_zero(here.get_coefficient_raster(6))
+            + count_non_zero(here.get_coefficient_raster(7));
     } else {
-        num_non_zeros_edge = count_non_zero(block.get_coefficient_raster(1 * 8))
-            + count_non_zero(block.get_coefficient_raster(2 * 8))
-            + count_non_zero(block.get_coefficient_raster(3 * 8))
-            + count_non_zero(block.get_coefficient_raster(4 * 8))
-            + count_non_zero(block.get_coefficient_raster(5 * 8))
-            + count_non_zero(block.get_coefficient_raster(6 * 8))
-            + count_non_zero(block.get_coefficient_raster(7 * 8));
+        num_non_zeros_edge = count_non_zero(here.get_coefficient_raster(1 * 8))
+            + count_non_zero(here.get_coefficient_raster(2 * 8))
+            + count_non_zero(here.get_coefficient_raster(3 * 8))
+            + count_non_zero(here.get_coefficient_raster(4 * 8))
+            + count_non_zero(here.get_coefficient_raster(5 * 8))
+            + count_non_zero(here.get_coefficient_raster(6 * 8))
+            + count_non_zero(here.get_coefficient_raster(7 * 8));
     }
 
     model
@@ -514,19 +519,6 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
         zig15offset = 7;
     }
 
-    // load everything here so that everything ends up cached
-    let above = if pt.is_above_present() {
-        block_context.above(image_data).get_block().clone()
-    } else {
-        [0; 64]
-    };
-    let left = if pt.is_left_present() {
-        block_context.left(image_data).get_block().clone()
-    } else {
-        [0; 64]
-    };
-    let here = block_context.here(image_data).get_block().clone();
-
     let mut coord = delta;
     for lane in 0..7 {
         if num_non_zeros_edge == 0 {
@@ -536,13 +528,13 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
         let ptcc8 = pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(
             qt,
             coord,
-            &here,
+            &here.get_block(),
             &above,
             &left,
             num_non_zeros_edge,
         );
 
-        let coef = block.get_coefficient((aligned_block_offset + (lane << log_edge_step)) as usize);
+        let coef = here.get_coefficient((aligned_block_offset + (lane << log_edge_step)) as usize);
 
         model
             .write_edge_coefficient(bool_writer, qt, pt, coef, coord, zig15offset, &ptcc8)

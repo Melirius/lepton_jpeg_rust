@@ -71,24 +71,66 @@ impl BlockContext {
         return retval;
     }
 
-    pub fn here_mut<'a>(&self, image_data: &'a mut BlockBasedImage) -> &'a mut AlignedBlock {
-        let retval = image_data.get_block_mut(self.cur_block_index);
-        return retval;
+    pub fn get_blocks_mut<'a>(
+        &self,
+        image_data: &'a mut BlockBasedImage,
+        left_present: bool,
+        above_present: bool,
+    ) -> (
+        &'a [i16; 64],
+        &'a [i16; 64],
+        &'a [i16; 64],
+        &'a mut AlignedBlock,
+    ) {
+        image_data.get_blocks_mut(
+            if above_present {
+                self.above_block_index
+            } else {
+                -1
+            },
+            if left_present {
+                self.cur_block_index - 1
+            } else {
+                -1
+            },
+            if above_present && left_present {
+                self.above_block_index - 1
+            } else {
+                -1
+            },
+            self.cur_block_index,
+        )
     }
 
-    pub fn left<'a>(&self, image_data: &'a BlockBasedImage) -> &'a AlignedBlock {
-        let retval = image_data.get_block(self.cur_block_index - 1);
-        return retval;
-    }
-
-    pub fn above<'a>(&self, image_data: &'a BlockBasedImage) -> &'a AlignedBlock {
-        let retval = image_data.get_block(self.above_block_index);
-        return retval;
-    }
-
-    pub fn above_left<'a>(&self, image_data: &'a BlockBasedImage) -> &'a AlignedBlock {
-        let retval = image_data.get_block(self.above_block_index - 1);
-        return retval;
+    pub fn get_blocks<'a>(
+        &self,
+        image_data: &'a BlockBasedImage,
+        left_present: bool,
+        above_present: bool,
+    ) -> (
+        &'a [i16; 64],
+        &'a [i16; 64],
+        &'a [i16; 64],
+        &'a AlignedBlock,
+    ) {
+        image_data.get_blocks(
+            if above_present {
+                self.above_block_index
+            } else {
+                -1
+            },
+            if left_present {
+                self.cur_block_index - 1
+            } else {
+                -1
+            },
+            if above_present && left_present {
+                self.above_block_index - 1
+            } else {
+                -1
+            },
+            self.cur_block_index,
+        )
     }
 
     pub fn non_zeros_here(&self, num_non_zeros: &[NeighborSummary]) -> u8 {
