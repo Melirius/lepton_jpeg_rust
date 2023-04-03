@@ -185,10 +185,6 @@ fn process_row<W: Write>(
     component_size_in_block: i32,
 ) -> Result<()> {
     if block_width > 0 {
-        state
-            .neighbor_context_here(num_non_zeros)
-            .set_num_non_zeros(state.here(image_data).get_count_of_non_zeros_7x7());
-
         serialize_tokens::<W, false>(
             state,
             qt,
@@ -207,10 +203,6 @@ fn process_row<W: Write>(
     }
 
     for _jpeg_x in 1..block_width - 1 {
-        state
-            .neighbor_context_here(num_non_zeros)
-            .set_num_non_zeros(state.here(image_data).get_count_of_non_zeros_7x7());
-
         // shortcut all the checks for the presence of left/right components by passing a constant generic parameter
         if middle_model.is_all_present() {
             serialize_tokens::<W, true>(
@@ -244,10 +236,6 @@ fn process_row<W: Write>(
     }
 
     if block_width > 1 {
-        state
-            .neighbor_context_here(num_non_zeros)
-            .set_num_non_zeros(state.here(image_data).get_count_of_non_zeros_7x7());
-
         if right_model.is_all_present() {
             serialize_tokens::<W, true>(
                 state,
@@ -289,7 +277,10 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 ) -> Result<()> {
     debug_assert!(ALL_PRESENT == pt.is_all_present());
 
-    let num_non_zeros_7x7 = context.non_zeros_here(&num_non_zeros);
+    let (above, left, above_left, here) =
+        context.get_blocks(image_data, pt.is_left_present(), pt.is_above_present());
+
+    let num_non_zeros_7x7 = here.get_count_of_non_zeros_7x7();
 
     model
         .write_non_zero_7x7_count(
@@ -305,14 +296,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     let mut num_non_zeros_left_7x7 = num_non_zeros_7x7;
 
     #[cfg(feature = "detailed_tracing")]
-    trace!(
-        "block {0}:{1:x}",
-        context.get_here_index(),
-        block.get_hash()
-    );
-
-    let (above, left, above_left, block) =
-        context.get_blocks(image_data, pt.is_left_present(), pt.is_above_present());
+    trace!("block {0}:{1:x}", context.get_here_index(), here.get_hash());
 
     let best_priors =
         pt.calc_coefficient_context_7x7_aavg_block::<ALL_PRESENT>(above, left, above_left);
@@ -325,7 +309,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
         let best_prior_bit_length = u16_bit_length(best_priors[zig49] as u16);
 
         // this should work in all cases but doesn't utilize that the zig49 is related
-        let coef = block.get_coefficient(zig49);
+        let coef = here.get_coefficient(zig49);
         let coord = UNZIGZAG_49[zig49];
 
         model
@@ -356,7 +340,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     encode_edge::<W, ALL_PRESENT>(
         &above,
         &left,
-        block,
+        here,
         model,
         bool_writer,
         qt,
@@ -367,15 +351,15 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     )
     .context(here!())?;
 
-    let predicted_val = pt.adv_predict_dc_pix::<ALL_PRESENT>(block, qt, context, &num_non_zeros);
+    let predicted_val = pt.adv_predict_dc_pix::<ALL_PRESENT>(here, qt, context, &num_non_zeros);
 
     let avg_predicted_dc = ProbabilityTables::adv_predict_or_unpredict_dc(
-        block.get_dc(),
+        here.get_dc(),
         false,
         predicted_val.predicted_dc.into(),
     );
 
-    if block.get_dc() as i32
+    if here.get_dc() as i32
         != ProbabilityTables::adv_predict_or_unpredict_dc(
             avg_predicted_dc as i16,
             true,
@@ -396,18 +380,20 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
         )
         .context(here!())?;
 
-    let here = context.neighbor_context_here(num_non_zeros);
+    let neighbor_here = context.neighbor_context_here(num_non_zeros);
 
-    here.set_horizontal(
+    neighbor_here.set_num_non_zeros(num_non_zeros_7x7);
+
+    neighbor_here.set_horizontal(
         &predicted_val.advanced_predict_dc_pixels_sans_dc,
         qt.get_quantization_table(),
-        block.get_dc(),
+        here.get_dc(),
     );
 
-    here.set_vertical(
+    neighbor_here.set_vertical(
         &predicted_val.advanced_predict_dc_pixels_sans_dc,
         qt.get_quantization_table(),
-        block.get_dc(),
+        here.get_dc(),
     );
 
     Ok(())

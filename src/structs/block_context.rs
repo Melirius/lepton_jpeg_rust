@@ -66,11 +66,7 @@ impl BlockContext {
         };
     }
 
-    pub fn here<'a>(&self, image_data: &'a BlockBasedImage) -> &'a AlignedBlock {
-        let retval = image_data.get_block(self.cur_block_index);
-        return retval;
-    }
-
+    /// returns references to the surrounding blocks plus the current mutable one
     pub fn get_blocks_mut<'a>(
         &self,
         image_data: &'a mut BlockBasedImage,
@@ -102,6 +98,7 @@ impl BlockContext {
         )
     }
 
+    /// returns references to the surrounding blocks plus the current one 
     pub fn get_blocks<'a>(
         &self,
         image_data: &'a BlockBasedImage,
@@ -131,10 +128,6 @@ impl BlockContext {
             },
             self.cur_block_index,
         )
-    }
-
-    pub fn non_zeros_here(&self, num_non_zeros: &[NeighborSummary]) -> u8 {
-        return num_non_zeros[self.cur_num_non_zeros_index as usize].get_num_non_zeros();
     }
 
     pub fn get_non_zeros_above(&self, num_non_zeros: &[NeighborSummary]) -> u8 {
