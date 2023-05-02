@@ -9,6 +9,7 @@ use crate::helpers::*;
 
 use super::jpeg_header::JPegHeader;
 
+#[repr(C, align(64))]
 pub struct QuantizationTables {
     icos_idct_edge8192_dequantized_x: [i32; 64],
     icos_idct_edge8192_dequantized_y: [i32; 64],

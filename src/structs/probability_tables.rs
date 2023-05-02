@@ -27,11 +27,12 @@ pub struct ProbabilityTables {
     color_index: usize,
 }
 
+#[repr(C, align(32))]
 pub struct PredictDCResult {
+    pub advanced_predict_dc_pixels_sans_dc: [i16; 64],
     pub predicted_dc: i32,
     pub uncertainty: i16,
     pub uncertainty2: i16,
-    pub advanced_predict_dc_pixels_sans_dc: [i16; 64],
 }
 
 impl ProbabilityTables {

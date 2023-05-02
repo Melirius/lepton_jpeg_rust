@@ -6,6 +6,7 @@
 
 use std::num::Wrapping;
 
+#[repr(C, align(32))]
 #[derive(Copy, Clone)]
 pub struct NeighborSummary {
     edge_pixels_h: [i16; 8],
