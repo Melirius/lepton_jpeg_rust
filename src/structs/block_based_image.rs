@@ -169,21 +169,22 @@ impl BlockBasedImage {
     #[inline(always)]
     pub fn get_blocks_mut(
         &mut self,
+        here: i32,
         above: i32,
         left: i32,
         above_left: i32,
-        here: i32,
     ) -> (
-        &AlignedBlock,
-        &AlignedBlock,
-        &AlignedBlock,
         &mut AlignedBlock,
+        &AlignedBlock,
+        &AlignedBlock,
+        &AlignedBlock,
     ) {
         self.fill_up_to_dpos(here);
 
         let (first, rest) = self.image.split_at_mut((here - self.dpos_offset) as usize);
 
         return (
+            &mut rest[0],
             if above == -1 {
                 &EMPTY
             } else {
@@ -199,19 +200,19 @@ impl BlockBasedImage {
             } else {
                 &first[(above_left - self.dpos_offset) as usize]
             },
-            &mut rest[0],
         );
     }
 
     #[inline(always)]
     pub fn get_blocks(
         &self,
+        here: i32,
         above: i32,
         left: i32,
         above_left: i32,
-        here: i32,
     ) -> (&AlignedBlock, &AlignedBlock, &AlignedBlock, &AlignedBlock) {
         return (
+            &self.image[(here - self.dpos_offset) as usize],
             if above == -1 {
                 &EMPTY
             } else {
@@ -227,7 +228,6 @@ impl BlockBasedImage {
             } else {
                 &self.image[(above_left - self.dpos_offset) as usize]
             },
-            &self.image[(here - self.dpos_offset) as usize],
         );
     }
 }

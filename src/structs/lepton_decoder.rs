@@ -293,7 +293,7 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
     let mut eob_y: u8 = 0;
     let mut num_non_zeros_left_7x7: u8 = num_non_zeros_7x7;
 
-    let (above, left, above_left, here) =
+    let (here, above, left, above_left) =
         context.get_blocks_mut(image_data, pt.is_left_present(), pt.is_above_present());
 
     let best_priors =

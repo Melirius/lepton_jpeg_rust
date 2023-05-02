@@ -73,12 +73,13 @@ impl BlockContext {
         left_present: bool,
         above_present: bool,
     ) -> (
-        &'a AlignedBlock,
-        &'a AlignedBlock,
-        &'a AlignedBlock,
         &'a mut AlignedBlock,
+        &'a AlignedBlock,
+        &'a AlignedBlock,
+        &'a AlignedBlock,
     ) {
         image_data.get_blocks_mut(
+            self.cur_block_index,
             if above_present {
                 self.above_block_index
             } else {
@@ -94,7 +95,6 @@ impl BlockContext {
             } else {
                 -1
             },
-            self.cur_block_index,
         )
     }
 
@@ -111,6 +111,7 @@ impl BlockContext {
         &'a AlignedBlock,
     ) {
         image_data.get_blocks(
+            self.cur_block_index,
             if above_present {
                 self.above_block_index
             } else {
@@ -126,7 +127,6 @@ impl BlockContext {
             } else {
                 -1
             },
-            self.cur_block_index,
         )
     }
 

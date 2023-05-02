@@ -277,7 +277,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 ) -> Result<()> {
     debug_assert!(ALL_PRESENT == pt.is_all_present());
 
-    let (above, left, above_left, here) =
+    let (here, above, left, above_left) =
         context.get_blocks(image_data, pt.is_left_present(), pt.is_above_present());
 
     let num_non_zeros_7x7 = here.get_count_of_non_zeros_7x7();
