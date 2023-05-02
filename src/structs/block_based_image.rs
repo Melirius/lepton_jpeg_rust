@@ -291,22 +291,27 @@ impl AlignedBlock {
         return num_non_zeros7x7;
     }
 
+    #[inline(always)]
     pub fn get_coefficient(&self, index: usize) -> i16 {
         return self.raw_data[index];
     }
 
+    #[inline(always)]
     pub fn set_coefficient(&mut self, index: usize, v: i16) {
         self.raw_data[index] = v;
     }
 
+    #[inline(always)]
     pub fn set_coefficient_zigzag(&mut self, index: usize, v: i16) {
         self.raw_data[usize::from(ZIGZAG_TO_ALIGNED[index])] = v;
     }
 
+    #[inline(always)]
     pub fn get_coefficient_raster(&self, index: usize) -> i16 {
         return self.raw_data[usize::from(RASTER_TO_ALIGNED[index])];
     }
 
+    #[inline(always)]
     pub fn get_coefficient_zigzag(&self, index: usize) -> i16 {
         return self.raw_data[usize::from(ZIGZAG_TO_ALIGNED[index])];
     }

@@ -338,9 +338,9 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     }
 
     encode_edge::<W, ALL_PRESENT>(
+        here,
         above,
         left,
-        here,
         model,
         bool_writer,
         qt,
@@ -401,9 +401,9 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 fn encode_edge<W: Write, const ALL_PRESENT: bool>(
+    here: &AlignedBlock,
     above: &AlignedBlock,
     left: &AlignedBlock,
-    here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
     qt: &QuantizationTables,
@@ -413,9 +413,9 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
     eob_y: u8,
 ) -> Result<()> {
     encode_one_edge::<W, ALL_PRESENT, true>(
+        here,
         above,
         left,
-        here,
         model,
         bool_writer,
         qt,
@@ -425,9 +425,9 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
     )
     .context(here!())?;
     encode_one_edge::<W, ALL_PRESENT, false>(
+        here,
         above,
         left,
-        here,
         model,
         bool_writer,
         qt,
@@ -448,9 +448,9 @@ fn count_non_zero(v: i16) -> u8 {
 }
 
 fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
+    here: &AlignedBlock,
     above: &AlignedBlock,
     left: &AlignedBlock,
-    here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
     qt: &QuantizationTables,
