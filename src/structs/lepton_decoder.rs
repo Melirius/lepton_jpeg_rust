@@ -332,14 +332,14 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
             num_non_zeros_left_7x7 -= 1;
         }
 
-        here.get_block_mut()[zz as usize + ALIGNED_BLOCK_INDEX_AC_7X7_INDEX] = coef;
+        here.set_coefficient(zz as usize + ALIGNED_BLOCK_INDEX_AC_7X7_INDEX, coef);
     }
 
     decode_edge::<R, ALL_PRESENT>(
         model,
         bool_reader,
-        &above,
-        &left,
+        above,
+        left,
         here,
         qt,
         pt,
@@ -387,8 +387,8 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
 fn decode_edge<R: Read, const ALL_PRESENT: bool>(
     model: &mut Model,
     bool_reader: &mut VPXBoolReader<R>,
-    above: &[i16; 64],
-    left: &[i16; 64],
+    above: &AlignedBlock,
+    left: &AlignedBlock,
     here: &mut AlignedBlock,
     qt: &QuantizationTables,
     pt: &ProbabilityTables,
@@ -424,8 +424,8 @@ fn decode_edge<R: Read, const ALL_PRESENT: bool>(
 fn decode_one_edge<R: Read, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
     model: &mut Model,
     bool_reader: &mut VPXBoolReader<R>,
-    above: &[i16; 64],
-    left: &[i16; 64],
+    above: &AlignedBlock,
+    left: &AlignedBlock,
     here: &mut AlignedBlock,
     qt: &QuantizationTables,
     pt: &ProbabilityTables,
@@ -472,9 +472,9 @@ fn decode_one_edge<R: Read, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
         let ptcc8 = pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(
             qt,
             coord,
-            &here.get_block(),
-            &above,
-            &left,
+            here,
+            above,
+            left,
             num_non_zeros_edge,
         );
 

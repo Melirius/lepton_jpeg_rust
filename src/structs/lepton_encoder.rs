@@ -338,8 +338,8 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
     }
 
     encode_edge::<W, ALL_PRESENT>(
-        &above,
-        &left,
+        above,
+        left,
         here,
         model,
         bool_writer,
@@ -401,8 +401,8 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 fn encode_edge<W: Write, const ALL_PRESENT: bool>(
-    above: &[i16; 64],
-    left: &[i16; 64],
+    above: &AlignedBlock,
+    left: &AlignedBlock,
     here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
@@ -448,8 +448,8 @@ fn count_non_zero(v: i16) -> u8 {
 }
 
 fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
-    above: &[i16; 64],
-    left: &[i16; 64],
+    above: &AlignedBlock,
+    left: &AlignedBlock,
     here: &AlignedBlock,
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
@@ -514,9 +514,9 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
         let ptcc8 = pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(
             qt,
             coord,
-            &here.get_block(),
-            &above,
-            &left,
+            here,
+            above,
+            left,
             num_non_zeros_edge,
         );
 

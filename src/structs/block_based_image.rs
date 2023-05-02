@@ -173,26 +173,31 @@ impl BlockBasedImage {
         left: i32,
         above_left: i32,
         here: i32,
-    ) -> (&[i16; 64], &[i16; 64], &[i16; 64], &mut AlignedBlock) {
+    ) -> (
+        &AlignedBlock,
+        &AlignedBlock,
+        &AlignedBlock,
+        &mut AlignedBlock,
+    ) {
         self.fill_up_to_dpos(here);
 
         let (first, rest) = self.image.split_at_mut((here - self.dpos_offset) as usize);
 
         return (
             if above == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &first[(above - self.dpos_offset) as usize].get_block()
+                &first[(above - self.dpos_offset) as usize]
             },
             if left == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &first[(left - self.dpos_offset) as usize].get_block()
+                &first[(left - self.dpos_offset) as usize]
             },
             if above_left == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &first[(above_left - self.dpos_offset) as usize].get_block()
+                &first[(above_left - self.dpos_offset) as usize]
             },
             &mut rest[0],
         );
@@ -205,22 +210,22 @@ impl BlockBasedImage {
         left: i32,
         above_left: i32,
         here: i32,
-    ) -> (&[i16; 64], &[i16; 64], &[i16; 64], &AlignedBlock) {
+    ) -> (&AlignedBlock, &AlignedBlock, &AlignedBlock, &AlignedBlock) {
         return (
             if above == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &self.image[(above - self.dpos_offset) as usize].get_block()
+                &self.image[(above - self.dpos_offset) as usize]
             },
             if left == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &self.image[(left - self.dpos_offset) as usize].get_block()
+                &self.image[(left - self.dpos_offset) as usize]
             },
             if above_left == -1 {
-                &EMPTY.get_block()
+                &EMPTY
             } else {
-                &self.image[(above_left - self.dpos_offset) as usize].get_block()
+                &self.image[(above_left - self.dpos_offset) as usize]
             },
             &self.image[(here - self.dpos_offset) as usize],
         );
@@ -229,6 +234,8 @@ impl BlockBasedImage {
 
 /// block of 64 coefficients in the aligned order, which is similar to zigzag except that the 7x7 lower right square comes first,
 /// followed by the DC, followed by the edges
+/// AlignedBlock already always 128 byte aligned, so tell the compiler so it can be used with SIMD instructions
+#[repr(C, align(128))]
 pub struct AlignedBlock {
     raw_data: [i16; 64],
 }
@@ -252,10 +259,12 @@ impl AlignedBlock {
         block_data[usize::from(crate::consts::ZIGZAG_TO_ALIGNED[usize::from(index)])] = value;
     }
 
+    #[allow(dead_code)]
     pub fn get_block(&self) -> &[i16; 64] {
         return &self.raw_data;
     }
 
+    #[allow(dead_code)]
     pub fn get_block_mut(&mut self) -> &mut [i16; 64] {
         return &mut self.raw_data;
     }

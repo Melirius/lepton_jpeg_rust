@@ -73,9 +73,9 @@ impl BlockContext {
         left_present: bool,
         above_present: bool,
     ) -> (
-        &'a [i16; 64],
-        &'a [i16; 64],
-        &'a [i16; 64],
+        &'a AlignedBlock,
+        &'a AlignedBlock,
+        &'a AlignedBlock,
         &'a mut AlignedBlock,
     ) {
         image_data.get_blocks_mut(
@@ -98,16 +98,16 @@ impl BlockContext {
         )
     }
 
-    /// returns references to the surrounding blocks plus the current one 
+    /// returns references to the surrounding blocks plus the current one
     pub fn get_blocks<'a>(
         &self,
         image_data: &'a BlockBasedImage,
         left_present: bool,
         above_present: bool,
     ) -> (
-        &'a [i16; 64],
-        &'a [i16; 64],
-        &'a [i16; 64],
+        &'a AlignedBlock,
+        &'a AlignedBlock,
+        &'a AlignedBlock,
         &'a AlignedBlock,
     ) {
         image_data.get_blocks(
