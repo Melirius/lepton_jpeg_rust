@@ -80,9 +80,7 @@ pub struct ModelPerColor {
     residual_threshold_counts: [[[Branch; RESIDUAL_THRESHOLD_COUNTS_D3];
         RESIDUAL_THRESHOLD_COUNTS_D2]; RESIDUAL_THRESHOLD_COUNTS_D1],
 
-    exponent_counts: [[[[Branch; MAX_EXPONENT]; NUMERIC_LENGTH_MAX]; 49]; NUM_NON_ZERO_BINS],
-
-    exponent_counts_x: [[[[Branch; MAX_EXPONENT]; NUMERIC_LENGTH_MAX]; 15]; NUM_NON_ZERO_BINS],
+    exponent_counts: [[[[Branch; MAX_EXPONENT]; NUMERIC_LENGTH_MAX]; NUM_NON_ZERO_BINS]; 64],
 
     sign_counts: [[Branch; NUMERIC_LENGTH_MAX]; 4],
 }
@@ -136,6 +134,7 @@ impl ModelPerColor {
         .context(here!());
     }
 
+    #[inline(always)]
     fn get_coef_branches(
         &mut self,
         num_non_zeros_bin: usize,
@@ -152,7 +151,7 @@ impl ModelPerColor {
             num_non_zeros_bin
         );
 
-        let exp = &mut self.exponent_counts[num_non_zeros_bin][zig49][best_prior_bit_len];
+        let exp = &mut self.exponent_counts[zig49][num_non_zeros_bin][best_prior_bit_len];
         let sign = &mut self.sign_counts[0][0];
         let bits = &mut self.residual_noise_counts[zig49][num_non_zeros_bin];
         (exp, sign, bits)
@@ -230,8 +229,8 @@ impl ModelPerColor {
         zig15offset: usize,
         ptcc8: &ProbabilityTablesCoefficientContext,
     ) -> Result<i16> {
-        let length_branches = &mut self.exponent_counts_x[ptcc8.num_non_zeros_bin as usize]
-            [zig15offset][ptcc8.best_prior_bit_len as usize];
+        let length_branches = &mut self.exponent_counts[zig15offset + 49]
+            [ptcc8.num_non_zeros_bin as usize][ptcc8.best_prior_bit_len as usize];
 
         let length = bool_reader
             .get_unary_encoded(
@@ -314,8 +313,8 @@ impl ModelPerColor {
         zig15offset: usize,
         ptcc8: &ProbabilityTablesCoefficientContext,
     ) -> Result<()> {
-        let exp_array = &mut self.exponent_counts_x[ptcc8.num_non_zeros_bin as usize][zig15offset]
-            [ptcc8.best_prior_bit_len as usize];
+        let exp_array = &mut self.exponent_counts[zig15offset + 49]
+            [ptcc8.num_non_zeros_bin as usize][ptcc8.best_prior_bit_len as usize];
 
         let abs_coef = coef.unsigned_abs();
         let length = u16_bit_length(abs_coef) as usize;
@@ -476,6 +475,7 @@ impl Model {
         .context(here!());
     }
 
+    #[inline(always)]
     fn get_dc_branches(
         &mut self,
         uncertainty: i16,
@@ -508,6 +508,7 @@ impl Model {
         (exp, sign, bits)
     }
 
+    #[inline(always)]
     fn read_length_sign_coef<const A: usize, const B: usize, R: Read>(
         bool_reader: &mut VPXBoolReader<R>,
         magnitude_branches: &mut [Branch; A],
@@ -548,6 +549,7 @@ impl Model {
         return Ok(coef);
     }
 
+    #[inline(always)]
     fn write_length_sign_coef<const A: usize, const B: usize, W: Write>(
         bool_writer: &mut VPXBoolWriter<W>,
         coef: i16,
