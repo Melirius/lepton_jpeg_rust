@@ -138,22 +138,22 @@ impl ModelPerColor {
     fn get_coef_branches(
         &mut self,
         num_non_zeros_bin: usize,
-        zig49: usize,
+        zz: usize,
         best_prior_bit_len: usize,
     ) -> (
         &mut [Branch; MAX_EXPONENT],
         &mut Branch,
         &mut [Branch; MAX_EXPONENT - 1],
     ) {
-        debug_assert!(
-            num_non_zeros_bin < RESIDUAL_NOISE_COUNTS_D2,
-            "num_non_zeros_bin {0} too high",
-            num_non_zeros_bin
+        assert!(
+            zz < 64
+                && num_non_zeros_bin < NUM_NON_ZERO_BINS
+                && best_prior_bit_len < NUMERIC_LENGTH_MAX
         );
 
-        let exp = &mut self.exponent_counts[zig49][num_non_zeros_bin][best_prior_bit_len];
+        let exp = &mut self.exponent_counts[zz][num_non_zeros_bin][best_prior_bit_len];
         let sign = &mut self.sign_counts[0][0];
-        let bits = &mut self.residual_noise_counts[zig49][num_non_zeros_bin];
+        let bits = &mut self.residual_noise_counts[zz][num_non_zeros_bin];
         (exp, sign, bits)
     }
 
