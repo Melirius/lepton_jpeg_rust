@@ -55,7 +55,12 @@ const fn problookup() -> [u8; 65536] {
     return retval;
 }
 
+#[cfg(debug_assertions)]
 static PROB_LOOKUP: [u8; 65536] = problookup();
+
+// const lookup tables are faster in release optimized, but super slow in debug
+#[cfg(not(debug_assertions))]
+const PROB_LOOKUP: [u8; 65536] = problookup();
 
 const fn truelookup() -> [u16; 256] {
     let mut retval = [0; 256];
@@ -73,7 +78,11 @@ const fn truelookup() -> [u16; 256] {
     retval
 }
 
+#[cfg(debug_assertions)]
 static NORMALIZE_TRUE: [u16; 256] = truelookup();
+
+#[cfg(not(debug_assertions))]
+const NORMALIZE_TRUE: [u16; 256] = truelookup();
 
 const fn falselookup() -> [u16; 256] {
     let mut retval = [0; 256];
@@ -95,7 +104,11 @@ const fn falselookup() -> [u16; 256] {
     retval
 }
 
+#[cfg(debug_assertions)]
 static NORMALIZE_FALSE: [u16; 256] = falselookup();
+
+#[cfg(not(debug_assertions))]
+const NORMALIZE_FALSE: [u16; 256] = falselookup();
 
 impl Branch {
     pub fn new() -> Self {
