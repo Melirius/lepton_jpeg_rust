@@ -135,13 +135,9 @@ impl Branch {
 
     #[inline(always)]
     pub fn record_and_update_true_obs(&mut self) {
-        // do a wrapping subtraction so that we can catch both the case
-        // where counts is zero (special case for many trues in a row), or
-        // 0x**ff in which case we need to normalize
-        // The adjustment to handle zero is handled in the lookup table
-        if (self.counts & 0xff).wrapping_sub(1) < 0xfe {
-            // non-overflow case is easy
-            self.counts = self.counts.wrapping_add(1);
+        let x = self.counts.wrapping_add(1);
+        if x & 0xff > 1 {
+            self.counts = x;
         } else {
             self.counts = NORMALIZE_TRUE[(self.counts >> 8) as usize];
         }
@@ -149,13 +145,9 @@ impl Branch {
 
     #[inline(always)]
     pub fn record_and_update_false_obs(&mut self) {
-        // do a wrapping subtraction so that we can catch both the case
-        // where counts is zero (special case for many trues in a row), or
-        // 0xff** in which case we need to normalize.
-        // The adjustment to handle zero is handled in the lookup table
-        if self.counts.wrapping_sub(1) < 0xff00 {
-            // non-overflow case is easy
-            self.counts = self.counts.wrapping_add(0x100);
+        let x = self.counts.wrapping_add(0x100);
+        if x > 0x100 {
+            self.counts = x;
         } else {
             self.counts = NORMALIZE_FALSE[(self.counts & 0xff) as usize];
         }
