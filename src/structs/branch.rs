@@ -104,9 +104,10 @@ impl Branch {
         if !overflow {
             self.counts = result;
         } else {
-            // special case where it is all falses
+            // don't renormalize in case where it is already maximum false
             if self.counts != 0xff01 {
-                self.counts = ((1 + (self.counts & 0xff) as u32) >> 1) as u16 | 0x8100;
+                // renormalize by dividing by two rounding up (top byte will always be 0xff, so afterwards it will be 0x81)
+                self.counts = ((self.counts as u32 + 0x301) >> 1) as u16;
             }
         }
     }
