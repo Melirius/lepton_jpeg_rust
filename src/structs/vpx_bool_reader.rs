@@ -22,7 +22,10 @@ Neither the name of Google nor the names of its contributors may be used to endo
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-use std::io::{Read, Result};
+use std::{
+    io::{Read, Result},
+    num::NonZeroU32,
+};
 
 use crate::metrics::{Metrics, ModelComponent};
 
@@ -144,32 +147,20 @@ impl<R: Read> VPXBoolReader<R> {
 
         let probability = branch.get_probability() as u32;
 
-        let split = 1 + (((tmp_range - 1) * probability) >> BITS_IN_BYTE);
-        let big_split = (split as u64) << BITS_IN_LONG_MINUS_LAST_BYTE;
+        // optimizer is smart enough to know that this will always be > 0
+        let split = NonZeroU32::new(1 + (((tmp_range - 1) * probability) >> BITS_IN_BYTE)).unwrap();
+        let big_split = (split.get() as u64) << BITS_IN_LONG_MINUS_LAST_BYTE;
         let bit = tmp_value >= big_split;
 
         let shift;
         if bit {
             branch.record_and_update_true_obs();
-            tmp_range -= split;
+            tmp_range -= split.get();
             tmp_value -= big_split;
-
-            // so optimizer understands that 0 should never happen and uses a cold jump
-            // if we don't have LZCNT on x86 CPUs (older BSR instruction requires check for zero).
-            // This is better since the branch prediction figures quickly this never happens and can run
-            // the code sequentially.
-            #[cfg(all(
-                not(target_feature = "lzcnt"),
-                any(target_arch = "x86", target_arch = "x86_64")
-            ))]
-            assert!(tmp_range > 0);
-
             shift = tmp_range.leading_zeros() as i32 - 24;
         } else {
             branch.record_and_update_false_obs();
-            tmp_range = split;
-
-            // optimizer understands that split > 0
+            tmp_range = split.get();
             shift = split.leading_zeros() as i32 - 24;
         }
 

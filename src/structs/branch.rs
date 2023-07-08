@@ -73,6 +73,8 @@ impl Branch {
         PROB_LOOKUP[self.counts as usize]
     }
 
+    /// if counts contains any 0xff, then we need to use the slow path to record
+    /// the observation. Otherwise, we might need to renormalize the counts which
     #[inline(always)]
     pub fn record_and_update_true_obs(&mut self) {
         if (self.counts & 0xff) != 0xff {
@@ -94,18 +96,14 @@ impl Branch {
 
     #[inline(always)]
     pub fn record_and_update_false_obs(&mut self) {
-        if self.counts == 0x00ff {
-            // handle corner case where prob was set to zero (purely for compatibility, remove this if there is a breaking change in the format)
-            self.counts = 0x02ff;
-            return;
-        }
-
-        let (result, overflow) = self.counts.overflowing_add(0x100);
-        if !overflow {
-            self.counts = result;
+        if self.counts.wrapping_sub(0x100) < 0xfe00 {
+            self.counts += 0x100;
         } else {
-            // don't renormalize in case where it is already maximum false
-            if self.counts != 0xff01 {
+            if self.counts == 0x00ff {
+                // skip 0x01ff due to backwards compatibility
+                self.counts = 0x02ff;
+            } else if self.counts != 0xff01 {
+                // don't renormalize in case where it is already maximum false
                 // renormalize by dividing by two rounding up (top byte will always be 0xff, so afterwards it will be 0x81)
                 self.counts = ((self.counts as u32 + 0x301) >> 1) as u16;
             }
