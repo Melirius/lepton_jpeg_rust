@@ -73,27 +73,27 @@ impl Branch {
         PROB_LOOKUP[self.counts as usize]
     }
 
-    /// if counts contains any 0xff, then we need to use the slow path to record
-    /// the observation. Otherwise, we might need to renormalize the counts which
+    /// updates the counts when we see a true observation, renormalizing if necessary
     #[inline(always)]
     pub fn record_and_update_true_obs(&mut self) {
         if (self.counts & 0xff) != 0xff {
             // non-overflow case is easy
             self.counts += 1;
         } else {
-            // special case where it is all trues
             if self.counts <= 0x01ff {
-                // corner case since the original implementation
-                // insists on setting the probabily to zero,
-                // although the probability calculation would
-                // return 1.
+                // corner case which improves compression slightly if there are a lot of trues
+                // in a row. This makes the probability lower for the next true.
+                // We skip 0x01ff due to backwards compatibility with the C++ version
+                // on the way back up (see record_and_update_false_obs)
                 self.counts = 0x00ff;
             } else {
+                // renormalize by dividing everything by 2 rounding up
                 self.counts = (((self.counts as u32 + 0x100) >> 1) & 0xff00) as u16 | 129;
             }
         }
     }
 
+    /// updates the counts when we see a false observation, renormalizing if necessary
     #[inline(always)]
     pub fn record_and_update_false_obs(&mut self) {
         if self.counts.wrapping_sub(0x100) < 0xfe00 {
