@@ -70,29 +70,24 @@ impl<R: Read> VPXBoolReader<R> {
     }
 
     #[inline(never)]
-    pub fn get_grid<const A: usize, const B: usize>(
+    pub fn get_grid<const A: usize>(
         &mut self,
-        branches: &mut [[Branch; B]; A],
+        branches: &mut [Branch; A],
         cmp: ModelComponent,
     ) -> Result<usize> {
-        assert!(1 << (A - 1) == B);
+        // check if A is a power of 2
+        assert!((A & (A - 1)) == 0);
 
-        let mut index = A - 1;
-        let mut value = 0;
-        let mut decoded_so_far = 0;
+        let mut decoded_so_far = 1;
 
-        loop {
-            let cur_bit = self.get(&mut branches[index as usize][decoded_so_far], cmp)? as usize;
-            value |= cur_bit << index;
+        while decoded_so_far < A {
+            let cur_bit = self.get(&mut branches[decoded_so_far], cmp)? as usize;
             decoded_so_far <<= 1;
             decoded_so_far |= cur_bit as usize;
-
-            if index == 0 {
-                break;
-            }
-
-            index -= 1;
         }
+
+        // remove set leading bit
+        let value = decoded_so_far ^ A;
 
         Ok(value)
     }
@@ -174,6 +169,7 @@ impl<R: Read> VPXBoolReader<R> {
         let split = ((tmp_range >> BITS_IN_BYTE) * probability
             + ((256 - probability) << (BITS_IN_VALUE_MINUS_LAST_BYTE - BITS_IN_BYTE)))
             & (255 << BITS_IN_VALUE_MINUS_LAST_BYTE);
+        //let split = 0x01000000 + ((((tmp_range - 0x01000000) >> 8) * probability) & 0xFF000000);
 
         let bit = tmp_value >= split;
 
