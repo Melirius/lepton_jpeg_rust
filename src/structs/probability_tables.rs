@@ -158,7 +158,6 @@ impl ProbabilityTables {
     #[inline(always)]
     pub fn predict_current_edges(
         neighbors_data: &NeighborData,
-        nonzero_mask: u64,
         raster: &[i32x8; 8],
     ) -> (i32x8, i32x8) {
         // load initial predictors data from neighborhood blocks
@@ -169,11 +168,9 @@ impl ProbabilityTables {
         let mult: i32x8 = cast(ICOS_BASED_8192_SCALED);
 
         for col in 1..8 {
-            if nonzero_mask & (0xFF << (col * 8)) != 0 {
-                // some extreme coefficents can cause overflows, but since this is just predictors, no need to panic
-                vert_pred -= raster[col] * ICOS_BASED_8192_SCALED[col];
-                h_pred[col] = h_pred[col].wrapping_sub((raster[col] * mult).reduce_add());
-            }
+            // some extreme coefficents can cause overflows, but since this is just predictors, no need to panic
+            vert_pred -= raster[col] * ICOS_BASED_8192_SCALED[col];
+            h_pred[col] = h_pred[col].wrapping_sub((raster[col] * mult).reduce_add());
         }
 
         (cast(h_pred), vert_pred)
@@ -182,25 +179,17 @@ impl ProbabilityTables {
     // In these two functions we produce first part of edge DCT coefficients predictions
     // for neighborhood blocks and finalize dequantization of transposed raster
     ///#[inline(always)]
-    pub fn predict_next_edges(raster: &[i32x8; 8], nonzero_mask: u64) -> (i32x8, i32x8) {
+    pub fn predict_next_edges(raster: &[i32x8; 8]) -> (i32x8, i32x8) {
         let mut horiz_pred: [i32; 8] = [0; 8];
-        let mut vert_pred: i32x8 = 0.into();
+        let mut vert_pred: i32x8 = ICOS_BASED_8192_SCALED_PM[0] * raster[0];
 
         let mult: i32x8 = cast(ICOS_BASED_8192_SCALED_PM);
 
-        if nonzero_mask & 0xFE != 0 {
-            //raster[0] = get_i32x8(0, &here_tr) * get_i32x8(0, &q_tr);
-            //raster[0] &= all_but_first_mask; // DC should be zero for adv_predict_dc_pix
-
-            vert_pred = ICOS_BASED_8192_SCALED_PM[0] * raster[0];
-        }
         for col in 1..8 {
-            if nonzero_mask & (0xFF << (col * 8)) != 0 {
-                // produce predictions for edge DCT coefs for the block below
-                horiz_pred[col] = (mult * raster[col]).reduce_add();
-                // and for the block to the right
-                vert_pred += ICOS_BASED_8192_SCALED_PM[col] * raster[col];
-            }
+            // produce predictions for edge DCT coefs for the block below
+            horiz_pred[col] = (mult * raster[col]).reduce_add();
+            // and for the block to the right
+            vert_pred += ICOS_BASED_8192_SCALED_PM[col] * raster[col];
         }
 
         (cast(horiz_pred), vert_pred)

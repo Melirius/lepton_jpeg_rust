@@ -337,7 +337,7 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
     }
 
     let mut output = AlignedBlock::default();
-    let mut raster = [i32x8::ZERO; 8];
+    let mut raster = [i32x8::ZERO; 8]; // transposed
     let raster_col: &mut [i32; 64] = cast_mut(&mut raster);
     let mut nonzero_mask: u64 = 0;
 
@@ -355,8 +355,8 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
             ProbabilityTables::num_non_zeros_to_bin_7x7(num_non_zeros_7x7_remaining);
 
         // now loop through the coefficients in zigzag, terminating once we hit the number of non-zeros
-        for (zig49, &coord) in UNZIGZAG_49_TR.iter().enumerate() {
-            let best_prior_bit_length = u32_bit_length(best_priors[coord as usize] as u32);
+        for (zig49, &coord_tr) in UNZIGZAG_49_TR.iter().enumerate() {
+            let best_prior_bit_length = u32_bit_length(best_priors[coord_tr as usize] as u32);
 
             let coef = model_per_color
                 .read_coef(
@@ -368,11 +368,11 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
                 .context(here!())?;
 
             if coef != 0 {
-                output.set_coefficient(coord as usize, coef);
-                raster_col[coord as usize] = i32::from(coef)
-                    * i32::from(qt.get_quantization_table_transposed()[coord as usize]);
+                output.set_coefficient(coord_tr as usize, coef);
+                raster_col[coord_tr as usize] = i32::from(coef)
+                    * i32::from(qt.get_quantization_table_transposed()[coord_tr as usize]);
 
-                nonzero_mask |= 1 << coord;
+                nonzero_mask |= 1 << coord_tr;
 
                 num_non_zeros_7x7_remaining -= 1;
                 if num_non_zeros_7x7_remaining == 0 {
@@ -464,8 +464,7 @@ fn decode_edge<R: Read, const ALL_PRESENT: bool>(
 
     let num_non_zeros_bin = (num_non_zeros_7x7 + 3) / 7;
 
-    let (h_pred, v_pred) =
-        ProbabilityTables::predict_current_edges(neighbor_data, *nonzero_mask, raster);
+    let (h_pred, v_pred) = ProbabilityTables::predict_current_edges(neighbor_data, raster);
 
     decode_one_edge::<R, ALL_PRESENT, true>(
         model_per_color,
@@ -492,7 +491,7 @@ fn decode_edge<R: Read, const ALL_PRESENT: bool>(
         cast_mut(raster),
     )?;
 
-    let (horiz_pred, vert_pred) = ProbabilityTables::predict_next_edges(raster, *nonzero_mask);
+    let (horiz_pred, vert_pred) = ProbabilityTables::predict_next_edges(raster);
 
     Ok((horiz_pred, vert_pred))
 }

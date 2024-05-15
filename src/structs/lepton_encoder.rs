@@ -498,8 +498,7 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
         q_tr.as_i16x8(7).mul_widen(here_tr.as_i16x8(7)),
     ];
 
-    let (h_pred, v_pred) =
-        ProbabilityTables::predict_current_edges(neighbors_data, nonzero_mask, &raster);
+    let (h_pred, v_pred) = ProbabilityTables::predict_current_edges(neighbors_data, &raster);
 
     // here we calculate the furthest x and y coordinates that have non-zero coefficients
     // which are used as predictors for the number of edge coefficients
@@ -542,7 +541,7 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
     )
     .context(here!())?;
 
-    let (h_pred, v_pred) = ProbabilityTables::predict_next_edges(&raster, nonzero_mask);
+    let (h_pred, v_pred) = ProbabilityTables::predict_next_edges(&raster);
     Ok((raster, h_pred, v_pred))
 }
 
