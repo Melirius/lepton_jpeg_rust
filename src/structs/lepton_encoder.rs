@@ -578,28 +578,32 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
     }
 
     let mut coord_tr = delta;
-    let mut num_non_zeros_left = num_non_zeros_edge;
+    let mut num_non_zeros_remaining = num_non_zeros_edge;
 
     for _lane in 0..7 {
-        if num_non_zeros_left == 0 {
+        if num_non_zeros_remaining == 0 {
             break;
         }
 
-        let ptcc8 = pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(
-            qt,
-            coord_tr,
-            pred,
-            num_non_zeros_left,
+        let best_prior = pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(
+            qt, coord_tr, pred,
         );
 
         let coef = block.get_coefficient(coord_tr);
 
         model_per_color
-            .write_edge_coefficient(bool_writer, qt, coef, zig15offset, &ptcc8)
+            .write_edge_coefficient(
+                bool_writer,
+                qt,
+                coef,
+                zig15offset,
+                num_non_zeros_remaining,
+                best_prior,
+            )
             .context(here!())?;
 
         if coef != 0 {
-            num_non_zeros_left -= 1;
+            num_non_zeros_remaining -= 1;
         }
 
         coord_tr += delta;

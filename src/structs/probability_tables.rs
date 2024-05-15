@@ -4,18 +4,14 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use std::cmp;
-
 use crate::consts::*;
 use crate::enabled_features;
-use crate::helpers::*;
 use crate::structs::idct::*;
 use crate::structs::model::*;
 use crate::structs::quantization_tables::*;
 
 use super::block_based_image::AlignedBlock;
 use super::block_context::NeighborData;
-use super::probability_tables_coefficient_context::ProbabilityTablesCoefficientContext;
 
 use wide::i16x8;
 use wide::i32x8;
@@ -123,34 +119,39 @@ impl ProbabilityTables {
         left: &AlignedBlock,
         above: &AlignedBlock,
         above_left: &AlignedBlock,
-    ) -> [i16; 64] {
+    ) -> [u16; 64] {
         let mut best_prior = [0; 64];
 
         if ALL_PRESENT {
             // compiler does a pretty amazing job with SSE/AVX2 here
             for i in 8..64 {
                 // approximate average of 3 without a divide with double the weight for left/top vs diagonal
-                best_prior[i] = (((left.get_coefficient(i).abs() as u32
-                    + above.get_coefficient(i).abs() as u32)
+                //
+                // No need to go to 32 bits since max exponent is 11, ie 2047, so
+                // (2047 + 2047) * 13 + 2047 * 6 = 65504 which still fits in 16 bits.
+                // In addition, if we ever returned anything higher that 2047, it would
+                // assert in the array lookup in the model.
+                best_prior[i] = ((left.get_coefficient(i).unsigned_abs()
+                    + above.get_coefficient(i).unsigned_abs())
                     * 13
-                    + 6 * above_left.get_coefficient(i).abs() as u32)
-                    >> 5) as i16;
+                    + 6 * above_left.get_coefficient(i).unsigned_abs())
+                    >> 5;
             }
         } else {
             // handle edge case :) where we are on the top or left edge
 
             if self.left_present {
                 for i in 8..64 {
-                    best_prior[i] = left.get_coefficient(i).abs();
+                    best_prior[i] = left.get_coefficient(i).unsigned_abs();
                 }
             } else if self.above_present {
                 for i in 8..64 {
-                    best_prior[i] = above.get_coefficient(i).abs();
+                    best_prior[i] = above.get_coefficient(i).unsigned_abs();
                 }
             }
         }
 
-        return best_prior;
+        best_prior
     }
 
     // here we dequantize raster coefficients
@@ -212,16 +213,11 @@ impl ProbabilityTables {
         qt: &QuantizationTables,
         coefficient_tr: usize,
         pred: &[i32; 8],
-        num_non_zeros_x: u8,
-    ) -> ProbabilityTablesCoefficientContext {
+    ) -> i32 {
         if !ALL_PRESENT
             && ((HORIZONTAL && !self.above_present) || (!HORIZONTAL && !self.left_present))
         {
-            return ProbabilityTablesCoefficientContext {
-                best_prior: 0,
-                num_non_zeros_bin: num_non_zeros_x - 1,
-                best_prior_bit_len: 0,
-            };
+            return 0;
         }
 
         let mut best_prior: i32 = pred[if HORIZONTAL {
@@ -231,11 +227,7 @@ impl ProbabilityTables {
         }];
         best_prior /= (qt.get_quantization_table_transposed()[coefficient_tr] as i32) << 13;
 
-        return ProbabilityTablesCoefficientContext {
-            best_prior,
-            num_non_zeros_bin: num_non_zeros_x - 1,
-            best_prior_bit_len: cmp::min(u32_bit_length(best_prior.unsigned_abs()), 10),
-        };
+        return best_prior;
     }
 
     fn from_stride(block: &[i16; 64], offset: usize, stride: usize) -> i16x8 {
