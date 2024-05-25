@@ -138,8 +138,9 @@ fn decode_row_wrapper<R: Read>(
 
     let component_size_in_blocks = component_size_in_blocks[component];
     let block_width = image_data.get_block_width();
+    let block_number = block_width.min(component_size_in_blocks - curr_y * block_width);
 
-    for jpeg_x in 0..block_width {
+    for jpeg_x in 0..block_number {
         let pt = if jpeg_x == 0 {
             left_model
         } else {
@@ -172,11 +173,7 @@ fn decode_row_wrapper<R: Read>(
             .context(here!())?;
         }
 
-        let offset = block_context.next();
-
-        if offset >= component_size_in_blocks {
-            return Ok(()); // no sure if this is an error
-        }
+        block_context.next();
     }
 
     Ok(())

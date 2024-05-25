@@ -142,7 +142,7 @@ fn process_row<W: Write>(
     is_top_row: &mut [bool],
     component: usize,
     curr_y: i32,
-    component_size_in_block: i32,
+    component_size_in_blocks: i32,
     features: &EnabledFeatures,
 ) -> Result<()> {
     let mut block_context = image_data.off_y(curr_y);
@@ -161,8 +161,9 @@ fn process_row<W: Write>(
     }
 
     let block_width = image_data.get_block_width();
+    let block_number = block_width.min(component_size_in_blocks - curr_y * block_width);
 
-    for jpeg_x in 0..block_width {
+    for jpeg_x in 0..block_number {
         let pt = if jpeg_x == 0 {
             left_model
         } else {
@@ -196,11 +197,7 @@ fn process_row<W: Write>(
             .context(here!())?;
         }
 
-        let offset = block_context.next();
-
-        if offset >= component_size_in_block {
-            return Ok(());
-        }
+        block_context.next();
     }
 
     Ok(())

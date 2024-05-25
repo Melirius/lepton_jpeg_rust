@@ -32,13 +32,11 @@ impl BlockContext {
 
     // as each new line BlockContext is set by `off_y`, no edge cases with dereferencing
     // out of bounds indices is possilbe, therefore no special treatment is needed
-    pub fn next(&mut self) -> i32 {
+    pub fn next(&mut self) {
         self.cur_block_index += 1;
         self.above_block_index += 1;
         self.cur_num_non_zeros_index += 1;
         self.above_num_non_zero_index += 1;
-
-        self.cur_block_index
     }
 
     pub fn new(
