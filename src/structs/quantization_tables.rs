@@ -62,7 +62,7 @@ impl QuantizationTables {
                 retval.quantization_table_transposed[coord_tr] = q;
 
                 // the division-by-reciprocal-multiplication method used is working
-                // up to values of 8355, else we fallback to division
+                // up to values of MAX_NORMAL_Q, else we fallback to division
                 if q > MAX_NORMAL_Q {
                     retval.normal_table = false;
                 }
