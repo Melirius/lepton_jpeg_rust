@@ -536,14 +536,14 @@ fn decode_one_edge<R: Read, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
     let (best_prior_sign, best_prior_abs) =
         pt.calc_coefficient_context8_lak::<ALL_PRESENT, HORIZONTAL>(qt, pred);
 
-    for lane in 0..7 {
+    for lane in 1..8 {
         let coef = model_per_color.read_edge_coefficient(
             bool_reader,
             qt,
             zig15offset,
             num_non_zeros_edge,
-            best_prior_sign.as_array_ref()[lane + 1],
-            best_prior_abs.as_array_ref()[lane + 1],
+            best_prior_sign.as_array_ref()[lane],
+            best_prior_abs.as_array_ref()[lane],
         )?;
 
         if coef != 0 {

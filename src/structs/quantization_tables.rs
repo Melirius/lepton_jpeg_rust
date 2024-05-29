@@ -11,6 +11,14 @@ use crate::helpers::*;
 
 use super::jpeg_header::JPegHeader;
 
+// The maximal quantization coefficient for which division-by-multiplication scheme
+// of `calc_coefficient_context8_lak` is working. This should cover all standard JPEGs,
+// as normal DCT coefficients are less than 2048 in magnitude for 8-bit JPEGs
+// (and they should have 8-bit quantization tables, citing JPEG standard, sec. B.2.4.1
+// "Quantization table-specification syntax": "An 8-bit DCT-based process
+// shall not use a 16-bit precision quantization table.").
+const MAX_NORMAL_Q: u16 = 4177;
+
 pub struct QuantizationTables {
     quantization_table: [u16; 64],
     quantization_table_transposed: [u16; 64],
@@ -23,6 +31,8 @@ pub struct QuantizationTables {
     // Calculated using approximate maximal magnitudes
     // of these coefficients `FREQ_MAX`
     min_noise_threshold: [u8; 14],
+
+    normal_table: bool,
 }
 
 impl QuantizationTables {
@@ -39,6 +49,7 @@ impl QuantizationTables {
             min_noise_threshold: [0; 14],
             quantization_table_transposed_recip_vert: u32x8::default(),
             quantization_table_transposed_recip_horiz: u32x8::default(),
+            normal_table: true,
         };
 
         for pixel_row in 0..8 {
@@ -49,6 +60,12 @@ impl QuantizationTables {
 
                 retval.quantization_table[coord] = q;
                 retval.quantization_table_transposed[coord_tr] = q;
+
+                // the division-by-reciprocal-multiplication method used is working
+                // up to values of 8355, else we fallback to division
+                if q > MAX_NORMAL_Q {
+                    retval.normal_table = false;
+                }
             }
         }
 
@@ -110,4 +127,30 @@ impl QuantizationTables {
     pub fn get_min_noise_threshold(&self, coef: usize) -> u8 {
         self.min_noise_threshold[coef]
     }
+
+    pub fn is_normal_table(&self) -> bool {
+        self.normal_table
+    }
+}
+
+#[test]
+fn recip_test() {
+    use rayon::prelude::*;
+
+    assert!((1..MAX_NORMAL_Q as u64 + 1).into_par_iter().all(|q| {
+        let recip = QuantizationTables::recip(q as u16) as u64;
+        for i in 0u64..(1 << 19) + 1 {
+            if i / q != i * recip >> 31 {
+                return false;
+            };
+        }
+        return true;
+    }));
+
+    // for q in 1..MAX_NORMAL_Q as u64 + 1 {
+    //     let recip = QuantizationTables::recip(q as u16) as u64;
+    //     for i in 0u64..(1 << 19) + 1 {
+    //         assert_eq!(i / q, i * recip >> 31, "{} {}", i, q);
+    //     }
+    // }
 }

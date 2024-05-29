@@ -14,10 +14,7 @@ use super::block_based_image::AlignedBlock;
 use super::block_context::NeighborData;
 
 use bytemuck::cast;
-use wide::i16x8;
-use wide::i32x8;
-use wide::u32x8;
-use wide::CmpLt;
+use wide::{i16x8, i32x8, u32x8, CmpGt, CmpLt};
 
 pub struct ProbabilityTables {
     left_present: bool,
@@ -212,11 +209,11 @@ impl ProbabilityTables {
         &self,
         qt: &QuantizationTables,
         pred: &i32x8,
-    ) -> (i32x8, u32x8) {
+    ) -> (i16x8, u32x8) {
         #[inline]
         fn mul_hi(lhs: u32x8, rhs: u32x8) -> u32x8 {
-            let a: [u32; 8] = cast(lhs);
-            let b: [u32; 8] = cast(rhs);
+            let a = lhs.to_array();
+            let b = rhs.to_array();
             cast([
                 ((u64::from(a[0]) * u64::from(b[0])) >> 32) as u32,
                 ((u64::from(a[1]) * u64::from(b[1])) >> 32) as u32,
@@ -233,20 +230,44 @@ impl ProbabilityTables {
             && ((HORIZONTAL && !self.is_above_present())
                 || (!HORIZONTAL && !self.is_left_present()))
         {
-            (i32x8::ZERO, u32x8::ZERO)
+            (i16x8::ZERO, u32x8::ZERO)
         } else {
-            let recip = qt.quantization_table_transposed_recip::<HORIZONTAL>();
+            let (best_prior_abs, best_prior_i16) = if qt.is_normal_table() {
+                let recip = qt.quantization_table_transposed_recip::<HORIZONTAL>();
+                let pred_abs = pred.unsigned_abs() >> 12;
 
-            let pred_abs = pred.unsigned_abs();
+                let best_prior_abs: u32x8 = mul_hi(pred_abs, recip);
 
-            let best_prior_abs: u32x8 = mul_hi(pred_abs, recip) >> 12;
+                let orig_lt_zero: u32x8 = cast(i32x8::ZERO.cmp_gt(*pred));
+                let best_prior_i16 = i16x8::from_i32x8_truncate(cast(
+                    orig_lt_zero.blend(-best_prior_abs, best_prior_abs),
+                ));
 
-            let orig_lt_zero = 1 - pred.cmp_lt(i32x8::ZERO);
-            let best_prior_is_zero: i32x8 = cast(!best_prior_abs.cmp_eq(u32x8::ZERO));
+                (best_prior_abs, best_prior_i16)
+            } else {
+                let mut pred: [i32; 8] = pred.to_array();
+                let q = if HORIZONTAL {
+                    qt.get_quantization_table()
+                } else {
+                    qt.get_quantization_table_transposed()
+                };
+                for i in 0..8 {
+                    pred[i] /= (q[i] as i32) << 13;
+                }
 
-            let best_prior_sign = best_prior_is_zero & orig_lt_zero;
+                let best_prior = i32x8::from(pred);
 
-            (best_prior_sign, best_prior_abs)
+                (
+                    best_prior.unsigned_abs(),
+                    i16x8::from_i32x8_truncate(best_prior),
+                )
+            };
+
+            let gt_zero = best_prior_i16.cmp_gt(i16x8::ZERO);
+            let lt_zero = best_prior_i16.cmp_lt(i16x8::ZERO);
+            let minus_sign_index: i16x8 = gt_zero + (lt_zero << 1);
+
+            (-minus_sign_index, best_prior_abs)
         }
     }
 

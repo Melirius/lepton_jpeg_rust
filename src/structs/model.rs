@@ -333,7 +333,7 @@ impl ModelPerColor {
         qt: &QuantizationTables,
         zig15offset: usize,
         num_non_zeros_edge: u8,
-        best_prior_sign_index: i32,
+        best_prior_sign_index: i16,
         best_prior_abs: u32,
     ) -> Result<i16> {
         let num_non_zeros_edge_bin = usize::from(num_non_zeros_edge) - 1;
@@ -428,7 +428,7 @@ impl ModelPerColor {
         coef: i16,
         zig15offset: usize,
         num_non_zeros_edge: u8,
-        best_prior_sign_index: i32,
+        best_prior_sign_index: i16,
         best_prior_abs: u32,
     ) -> Result<()> {
         let num_non_zeros_edge_bin = usize::from(num_non_zeros_edge) - 1;
