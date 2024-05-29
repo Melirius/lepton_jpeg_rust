@@ -60,12 +60,6 @@ impl QuantizationTables {
 
                 retval.quantization_table[coord] = q;
                 retval.quantization_table_transposed[coord_tr] = q;
-
-                // the division-by-reciprocal-multiplication method used is working
-                // up to values of MAX_NORMAL_Q, else we fallback to division
-                if q > MAX_NORMAL_Q {
-                    retval.normal_table = false;
-                }
             }
         }
 
@@ -80,10 +74,18 @@ impl QuantizationTables {
 
         for i in 0..14 {
             let coord = if i < 7 { i + 1 } else { (i - 6) * 8 };
-            if retval.quantization_table[coord] < 9 {
-                let mut freq_max = FREQ_MAX[i] + retval.quantization_table[coord] - 1;
-                if retval.quantization_table[coord] != 0 {
-                    freq_max /= retval.quantization_table[coord];
+            let q = retval.quantization_table[coord];
+
+            // the division-by-reciprocal-multiplication method used is working
+            // up to values of MAX_NORMAL_Q, else we should fallback to division
+            if q > MAX_NORMAL_Q {
+                retval.normal_table = false;
+            }
+
+            if q < 9 {
+                let mut freq_max = FREQ_MAX[i] + q - 1;
+                if q != 0 {
+                    freq_max /= q;
                 }
 
                 let max_len = u16_bit_length(freq_max) as u8;
