@@ -4,20 +4,19 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use crate::structs::component_info::*;
-
 use std::cmp;
 
-use super::jpeg_header::JPegHeader;
+use crate::structs::component_info::*;
+use crate::structs::jpeg_header::JPegHeader;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TrucateComponentsInfo {
     trunc_bcv: i32, // the number of vertical components in this (truncated) image
 
     trunc_bc: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TruncateComponents {
     trunc_info: Vec<TrucateComponentsInfo>,
 
@@ -28,8 +27,8 @@ pub struct TruncateComponents {
     pub mcu_count_vertical: i32,
 }
 
-impl TruncateComponents {
-    pub fn new() -> Self {
+impl Default for TruncateComponents {
+    fn default() -> Self {
         return TruncateComponents {
             trunc_info: Vec::new(),
             components_count: 0,
@@ -37,7 +36,9 @@ impl TruncateComponents {
             mcu_count_vertical: 0,
         };
     }
+}
 
+impl TruncateComponents {
     pub fn init(&mut self, jpeg_header: &JPegHeader) {
         self.mcu_count_horizontal = jpeg_header.mcuh;
         self.mcu_count_vertical = jpeg_header.mcuv;

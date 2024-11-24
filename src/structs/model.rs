@@ -4,21 +4,19 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::{Context, Result};
 use std::cmp;
 use std::io::{Read, Write};
 
-use crate::consts::*;
-use crate::helpers::{calc_sign_index, err_exit_code, here, u16_bit_length, u32_bit_length};
-use crate::lepton_error::ExitCode;
-use crate::metrics::{ModelComponent, ModelSubComponent};
-use crate::structs::branch::Branch;
 use default_boxed::DefaultBoxed;
 
-use super::probability_tables::ProbabilityTables;
-use super::quantization_tables::QuantizationTables;
-use super::vpx_bool_reader::VPXBoolReader;
-use super::vpx_bool_writer::VPXBoolWriter;
+use crate::consts::*;
+use crate::helpers::{calc_sign_index, u16_bit_length, u32_bit_length};
+use crate::lepton_error::{err_exit_code, AddContext, ExitCode, Result};
+use crate::metrics::{ModelComponent, ModelSubComponent};
+use crate::structs::branch::Branch;
+use crate::structs::quantization_tables::QuantizationTables;
+use crate::structs::vpx_bool_reader::VPXBoolReader;
+use crate::structs::vpx_bool_writer::VPXBoolWriter;
 
 const BLOCK_TYPES: usize = 2; // setting this to 3 gives us ~1% savings.. 2/3 from BLOCK_TYPES=2
 
@@ -35,7 +33,8 @@ const NUM_NON_ZERO_EDGE_BINS: usize = 7;
 type NumNonZerosCountsT = [[[Branch; 1 << NON_ZERO_EDGE_COUNT_BITS]; 8]; 8];
 
 const RESIDUAL_THRESHOLD_COUNTS_D1: usize = 1 << (1 + RESIDUAL_NOISE_FLOOR);
-const RESIDUAL_THRESHOLD_COUNTS_D2: usize = 1 + RESIDUAL_NOISE_FLOOR;
+// The array was used only on indices [2,7] of [0,7]
+const RESIDUAL_THRESHOLD_COUNTS_D2: usize = 1 + RESIDUAL_NOISE_FLOOR - 2;
 const RESIDUAL_THRESHOLD_COUNTS_D3: usize = 1 << RESIDUAL_NOISE_FLOOR;
 
 #[derive(DefaultBoxed)]
@@ -126,8 +125,9 @@ impl Model {
     /// calculates a checksum of the model so we can compare two models for equality
     #[cfg(test)]
     pub fn model_checksum(&mut self) -> u64 {
-        use siphasher::sip::SipHasher13;
         use std::hash::Hasher;
+
+        use siphasher::sip::SipHasher13;
 
         let mut h = SipHasher13::new();
         self.walk(|x| {
@@ -227,7 +227,7 @@ impl ModelPerColor {
             ModelComponent::Coef(ModelSubComponent::Sign),
             ModelComponent::Coef(ModelSubComponent::Noise),
         )
-        .context(here!());
+        .context();
     }
 
     #[inline(always)]
@@ -278,7 +278,7 @@ impl ModelPerColor {
                 num_non_zeros_prob,
                 ModelComponent::NonZero7x7Count,
             )
-            .context(here!());
+            .context();
     }
 
     pub fn write_non_zero_edge_count<W: Write, const HORIZONTAL: bool>(
@@ -297,7 +297,7 @@ impl ModelPerColor {
                 prob_edge_eob,
                 ModelComponent::NonZeroEdgeCount,
             )
-            .context(here!());
+            .context();
     }
 
     pub fn read_non_zero_7x7_count<R: Read>(
@@ -310,7 +310,7 @@ impl ModelPerColor {
 
         return Ok(bool_reader
             .get_grid(num_non_zeros_prob, ModelComponent::NonZero7x7Count)
-            .context(here!())? as u8);
+            .context()? as u8);
     }
 
     pub fn read_non_zero_edge_count<R: Read, const HORIZONTAL: bool>(
@@ -324,7 +324,7 @@ impl ModelPerColor {
 
         return Ok(bool_reader
             .get_grid(prob_edge_eob, ModelComponent::NonZeroEdgeCount)
-            .context(here!())? as u8);
+            .context()? as u8);
     }
 
     pub fn read_edge_coefficient<R: Read>(
@@ -360,7 +360,7 @@ impl ModelPerColor {
                 length_branches,
                 ModelComponent::Edge(ModelSubComponent::Exp),
             )
-            .context(here!())? as i32;
+            .context()? as i32;
 
         let mut coef = 0;
         if length != 0 {
@@ -370,8 +370,8 @@ impl ModelPerColor {
                 &mut self.sign_counts[calc_sign_index(best_prior as i16)][best_prior_bit_len];
 
             let neg = !bool_reader
-                .get(sign, ModelComponent::Edge(ModelSubComponent::Sign))
-                .context(here!())?;
+                .get_bit(sign, ModelComponent::Edge(ModelSubComponent::Sign))
+                .context()?;
 
             coef = 1;
 
@@ -388,7 +388,7 @@ impl ModelPerColor {
 
                     let mut decoded_so_far = 1;
                     while i >= min_threshold {
-                        let cur_bit = bool_reader.get(
+                        let cur_bit = bool_reader.get_bit(
                             &mut thresh_prob[decoded_so_far],
                             ModelComponent::Edge(ModelSubComponent::Residual),
                         )? as i16;
@@ -472,7 +472,7 @@ impl ModelPerColor {
             let sign =
                 &mut self.sign_counts[calc_sign_index(best_prior as i16)][best_prior_bit_len];
 
-            bool_writer.put(
+            bool_writer.put_bit(
                 coef >= 0,
                 sign,
                 ModelComponent::Edge(ModelSubComponent::Sign),
@@ -492,7 +492,7 @@ impl ModelPerColor {
                     let mut encoded_so_far = 1;
                     while i >= min_threshold {
                         let cur_bit = (abs_coef & (1 << i)) != 0;
-                        bool_writer.put(
+                        bool_writer.put_bit(
                             cur_bit,
                             &mut thresh_prob[encoded_so_far],
                             ModelComponent::Edge(ModelSubComponent::Residual),
@@ -522,7 +522,7 @@ impl ModelPerColor {
                             res_prob,
                             ModelComponent::Edge(ModelSubComponent::Noise),
                         )
-                        .context(here!())?;
+                        .context()?;
                 }
             }
         }
@@ -536,16 +536,18 @@ impl ModelPerColor {
         min_threshold: i32,
         length: i32,
     ) -> &mut [Branch; RESIDUAL_THRESHOLD_COUNTS_D3] {
-        // need to & 0xffff since C++ version casts to a uint16_t in the array lookup
+        // Need to & 0xffff since C++ version casts to a uint16_t in the array lookup
         // and we need to match that behavior. It's unlikely that this will be a problem
         // since it would require an extremely large best_prior, which is difficult
         // due to the range limits of 2047 of the coefficients but still in the
         // interest of correctness we should match the C++ behavior.
+        // This function was invoked only with `length - 2 >= min_threshold`,
+        // then 2nd array index range can be shortened by 2.
         return &mut self.residual_threshold_counts[cmp::min(
             ((best_prior_abs & 0xffff) >> min_threshold) as usize,
             self.residual_threshold_counts.len() - 1,
         )][cmp::min(
-            (length - min_threshold) as usize,
+            (length - min_threshold - 2) as usize,
             self.residual_threshold_counts[0].len() - 1,
         )];
     }
@@ -564,8 +566,8 @@ impl ModelPerColor {
 }
 
 impl Model {
-    pub fn get_per_color(&mut self, pt: &ProbabilityTables) -> &mut ModelPerColor {
-        &mut self.per_color[pt.get_color_index()]
+    pub fn get_per_color(&mut self, color_index: usize) -> &mut ModelPerColor {
+        &mut self.per_color[color_index]
     }
 
     pub fn read_dc<R: Read>(
@@ -586,7 +588,7 @@ impl Model {
             ModelComponent::DC(ModelSubComponent::Sign),
             ModelComponent::DC(ModelSubComponent::Noise),
         )
-        .context(here!());
+        .context();
     }
 
     pub fn write_dc<W: Write>(
@@ -609,7 +611,7 @@ impl Model {
             ModelComponent::DC(ModelSubComponent::Sign),
             ModelComponent::DC(ModelSubComponent::Noise),
         )
-        .context(here!());
+        .context();
     }
 
     fn get_dc_branches(
@@ -657,7 +659,7 @@ impl Model {
 
         let mut coef: i16 = 0;
         if length != 0 {
-            let neg = !bool_reader.get(sign_branch, sign_cmp)?;
+            let neg = !bool_reader.get_bit(sign_branch, sign_cmp)?;
             if length > 1 {
                 coef = bool_reader.get_n_bits(length - 1, bits_branch, bits_cmp)? as i16;
             }
@@ -702,7 +704,7 @@ impl Model {
 
         bool_writer.put_unary_encoded(coef_bit_len as usize, magnitude_branches, mag_cmp)?;
         if coef != 0 {
-            bool_writer.put(coef > 0, sign_branch, sign_cmp)?;
+            bool_writer.put_bit(coef > 0, sign_branch, sign_cmp)?;
         }
 
         if coef_bit_len > 1 {

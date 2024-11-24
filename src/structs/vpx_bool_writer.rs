@@ -25,13 +25,17 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 use std::io::{Result, Write};
 
 use crate::metrics::{Metrics, ModelComponent};
+use crate::structs::branch::Branch;
+use crate::structs::simple_hash::SimpleHash;
 
-use super::{branch::Branch, simple_hash::SimpleHash};
+// MAX_STREAM_BITS should be a multiple of 8 larger than 8,
+// and (MAX_STREAM_BITS + 1 bit of carry + 1 bit of divider)
+// should fit into 64 bits of `low_value`
+const MAX_STREAM_BITS: i32 = 56; //48; //40;// 32;// 24;// 16;//
 
 pub struct VPXBoolWriter<W> {
-    low_value: u32,
+    low_value: u64,
     range: u32,
-    count: i32,
     writer: W,
     buffer: Vec<u8>,
     model_statistics: Metrics,
@@ -42,9 +46,8 @@ pub struct VPXBoolWriter<W> {
 impl<W: Write> VPXBoolWriter<W> {
     pub fn new(writer: W) -> Result<Self> {
         let mut retval = VPXBoolWriter {
-            low_value: 0,
+            low_value: 1 << 9, // this divider bit keeps track of stream bits number
             range: 255,
-            count: -24,
             buffer: Vec::new(),
             writer: writer,
             model_statistics: Metrics::default(),
@@ -52,7 +55,8 @@ impl<W: Write> VPXBoolWriter<W> {
         };
 
         let mut dummy_branch = Branch::new();
-        retval.put(false, &mut dummy_branch, ModelComponent::Dummy)?;
+        // initial false bit is put to not get carry out of stream bits
+        retval.put_bit(false, &mut dummy_branch, ModelComponent::Dummy)?;
 
         Ok(retval)
     }
@@ -61,83 +65,21 @@ impl<W: Write> VPXBoolWriter<W> {
         self.model_statistics.drain()
     }
 
-    #[inline(never)]
-    pub fn put_grid<const A: usize>(
-        &mut self,
-        v: u8,
-        branches: &mut [Branch; A],
-        cmp: ModelComponent,
-    ) -> Result<()> {
-        // check if A is a power of 2
-        assert!((A & (A - 1)) == 0);
-
-        let mut index = A.ilog2() - 1;
-        let mut serialized_so_far = 1;
-
-        loop {
-            let cur_bit = (v & (1 << index)) != 0;
-            self.put(cur_bit, &mut branches[serialized_so_far], cmp)?;
-
-            if index == 0 {
-                break;
-            }
-
-            serialized_so_far <<= 1;
-            serialized_so_far |= cur_bit as usize;
-
-            index -= 1;
-        }
-
-        Ok(())
-    }
-
-    #[inline(never)]
-    pub fn put_n_bits<const A: usize>(
-        &mut self,
-        bits: usize,
-        num_bits: usize,
-        branches: &mut [Branch; A],
-        cmp: ModelComponent,
-    ) -> Result<()> {
-        let mut i: i32 = (num_bits - 1) as i32;
-        while i >= 0 {
-            self.put((bits & (1 << i)) != 0, &mut branches[i as usize], cmp)?;
-            i -= 1;
-        }
-
-        Ok(())
-    }
-
-    #[inline(never)]
-    pub fn put_unary_encoded<const A: usize>(
-        &mut self,
-        v: usize,
-        branches: &mut [Branch; A],
-        cmp: ModelComponent,
-    ) -> Result<()> {
-        assert!(v <= A);
-
-        for i in 0..A {
-            let cur_bit = v != i;
-
-            self.put(cur_bit, &mut branches[i], cmp)?;
-            if !cur_bit {
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
     #[inline(always)]
-    pub fn put(&mut self, value: bool, branch: &mut Branch, _cmp: ModelComponent) -> Result<()> {
+    pub fn put(
+        &mut self,
+        value: bool,
+        branch: &mut Branch,
+        tmp_value: &mut u64,
+        tmp_range: &mut u32,
+        _cmp: ModelComponent,
+    ) -> Result<()> {
         #[cfg(feature = "detailed_tracing")]
         {
             // used to detect divergences between the C++ and rust versions
             self.hash.hash(branch.get_u64());
-            self.hash.hash(self.low_value);
-            self.hash.hash(self.count);
-            self.hash.hash(self.range);
+            self.hash.hash(*tmp_value);
+            self.hash.hash(*tmp_range);
 
             let hashed_value = self.hash.get();
             //if hashedValue == 0xe35c28fd
@@ -151,25 +93,19 @@ impl<W: Write> VPXBoolWriter<W> {
 
         let probability = branch.get_probability() as u32;
 
-        let mut tmp_range = self.range;
-        let split = 1 + (((tmp_range - 1) * probability) >> 8);
-
-        let mut tmp_low_value = self.low_value;
+        let split = 1 + (((*tmp_range - 1) * probability) >> 8);
 
         let mut shift;
         branch.record_and_update_bit(value);
 
         if value {
-            tmp_low_value += split;
-            tmp_range -= split;
-
-            shift = (tmp_range as u8).leading_zeros() as i32;
+            *tmp_value += split as u64;
+            *tmp_range -= split;
         } else {
-            tmp_range = split;
-
-            // optimizer understands that split > 0, so it can optimize this
-            shift = (split as u8).leading_zeros() as i32;
+            *tmp_range = split;
         }
+
+        shift = (*tmp_range as u8).leading_zeros() as i32;
 
         #[cfg(feature = "compression_stats")]
         {
@@ -177,57 +113,190 @@ impl<W: Write> VPXBoolWriter<W> {
                 .record_compression_stats(_cmp, 1, i64::from(shift));
         }
 
-        tmp_range <<= shift;
+        *tmp_range <<= shift;
 
-        let mut tmp_count = self.count;
-        tmp_count += shift;
-
-        if tmp_count >= 0 {
-            let offset = shift - tmp_count;
-
-            if ((tmp_low_value << (offset - 1)) & 0x80000000) != 0 {
-                let mut x = self.buffer.len() - 1;
-
-                while self.buffer[x] == 0xFF {
-                    self.buffer[x] = 0;
-
-                    assert!(x > 0);
-                    x -= 1;
-                }
-
-                self.buffer[x] += 1;
+        // check whether we have more than MAX_STREAM_BITS stream bits after shift
+        let stream_bits = 64 - (*tmp_value).leading_zeros() as i32 - 2;
+        let count = shift + stream_bits - MAX_STREAM_BITS;
+        if count >= 0 {
+            // check carry
+            *tmp_value <<= MAX_STREAM_BITS - stream_bits;
+            if (*tmp_value & (1 << MAX_STREAM_BITS)) != 0 {
+                self.carry();
             }
+            // write all full bytes
+            let mut sh = MAX_STREAM_BITS - 8;
+            while sh > 0 {
+                self.buffer.push((*tmp_value >> sh) as u8);
+                sh -= 8;
+            }
+            *tmp_value &= (1 << 8) - 1; // exclude written bytes
+            *tmp_value |= 1 << 9; // restore divider bit
 
-            self.buffer.push((tmp_low_value >> (24 - offset)) as u8);
-            tmp_low_value <<= offset;
-            shift = tmp_count;
-            tmp_low_value &= 0xffffff;
-            tmp_count -= 8;
+            shift = count;
         }
 
-        tmp_low_value <<= shift;
-
-        self.count = tmp_count;
-        self.low_value = tmp_low_value;
-        self.range = tmp_range;
-
-        // check if we're out of buffer space, if yes - send the buffer to output,
-        if self.buffer.len() > 65536 - 128 {
-            self.flush_non_final_data()?;
-        }
+        *tmp_value <<= shift;
 
         Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<()> {
-        for _i in 0..32 {
-            let mut dummy_branch = Branch::new();
-            self.put(false, &mut dummy_branch, ModelComponent::Dummy)?;
+    /// Safe as: at the stream beginning initially put `false` ensure that carry cannot get out
+    /// of the first stream byte - then `carry` cannot be invoked on empty `buffer`,
+    /// and after the stream beginning `flush_non_final_data` keeps carry-terminating
+    /// byte sequence (one non-255-byte before any number of 255-bytes) inside the `buffer`.
+    #[inline(always)]
+    fn carry(&mut self) {
+        let mut x = self.buffer.len() - 1;
+
+        while self.buffer[x] == 0xFF {
+            self.buffer[x] = 0;
+
+            assert!(x > 0);
+            x -= 1;
         }
 
-        // Ensure there's no ambigous collision with any index marker bytes
-        if (self.buffer.last().unwrap() & 0xe0) == 0xc0 {
-            self.buffer.push(0);
+        self.buffer[x] += 1;
+    }
+
+    #[inline(always)]
+    pub fn put_grid<const A: usize>(
+        &mut self,
+        v: u8,
+        branches: &mut [Branch; A],
+        cmp: ModelComponent,
+    ) -> Result<()> {
+        // check if A is a power of 2
+        assert!((A & (A - 1)) == 0);
+        let mut tmp_value = self.low_value;
+        let mut tmp_range = self.range;
+
+        let mut index = A.ilog2() - 1;
+        let mut serialized_so_far = 1;
+
+        loop {
+            let cur_bit = (v & (1 << index)) != 0;
+            self.put(
+                cur_bit,
+                &mut branches[serialized_so_far],
+                &mut tmp_value,
+                &mut tmp_range,
+                cmp,
+            )?;
+
+            if index == 0 {
+                break;
+            }
+
+            serialized_so_far <<= 1;
+            serialized_so_far |= cur_bit as usize;
+
+            index -= 1;
+        }
+
+        self.low_value = tmp_value;
+        self.range = tmp_range;
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn put_n_bits<const A: usize>(
+        &mut self,
+        bits: usize,
+        num_bits: usize,
+        branches: &mut [Branch; A],
+        cmp: ModelComponent,
+    ) -> Result<()> {
+        let mut tmp_value = self.low_value;
+        let mut tmp_range = self.range;
+
+        let mut i: i32 = (num_bits - 1) as i32;
+        while i >= 0 {
+            self.put(
+                (bits & (1 << i)) != 0,
+                &mut branches[i as usize],
+                &mut tmp_value,
+                &mut tmp_range,
+                cmp,
+            )?;
+            i -= 1;
+        }
+
+        self.low_value = tmp_value;
+        self.range = tmp_range;
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn put_unary_encoded<const A: usize>(
+        &mut self,
+        v: usize,
+        branches: &mut [Branch; A],
+        cmp: ModelComponent,
+    ) -> Result<()> {
+        assert!(v <= A);
+
+        let mut tmp_value = self.low_value;
+        let mut tmp_range = self.range;
+
+        for i in 0..A {
+            let cur_bit = v != i;
+
+            self.put(
+                cur_bit,
+                &mut branches[i],
+                &mut tmp_value,
+                &mut tmp_range,
+                cmp,
+            )?;
+            if !cur_bit {
+                break;
+            }
+        }
+
+        self.low_value = tmp_value;
+        self.range = tmp_range;
+
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub fn put_bit(
+        &mut self,
+        value: bool,
+        branch: &mut Branch,
+        _cmp: ModelComponent,
+    ) -> Result<()> {
+        let mut tmp_value = self.low_value;
+        let mut tmp_range = self.range;
+
+        self.put(value, branch, &mut tmp_value, &mut tmp_range, _cmp)?;
+
+        self.low_value = tmp_value;
+        self.range = tmp_range;
+
+        Ok(())
+    }
+
+    // Here we write down only bytes of the stream necessary for decoding -
+    // opposite to initial Lepton implementation that writes down all the buffer.
+    pub fn finish(&mut self) -> Result<()> {
+        let mut tmp_value = self.low_value;
+        let stream_bits = 64 - tmp_value.leading_zeros() as i32 - 2;
+
+        tmp_value <<= MAX_STREAM_BITS - stream_bits;
+        if (tmp_value & (1 << MAX_STREAM_BITS)) != 0 {
+            self.carry();
+        }
+
+        let mut shift = MAX_STREAM_BITS - 8;
+        let mut stream_bytes = (stream_bits + 7) >> 3;
+        while stream_bytes > 0 {
+            self.buffer.push((tmp_value >> shift) as u8);
+            shift -= 8;
+            stream_bytes -= 1;
         }
 
         self.writer.write_all(&self.buffer[..])?;
@@ -235,24 +304,28 @@ impl<W: Write> VPXBoolWriter<W> {
     }
 
     /// When buffer is full and is going to be sent to output, preserve buffer data that
-    /// is not final and should carried over to the next buffer.
-    fn flush_non_final_data(&mut self) -> Result<()> {
+    /// is not final and should be carried over to the next buffer. At least one byte
+    /// will remain in `buffer` if it is non-empty.
+    pub fn flush_non_final_data(&mut self) -> Result<()> {
         // carry over buffer data that might be not final
-        let mut i = self.buffer.len() - 1;
-        while self.buffer[i] == 0xFF {
-            assert!(i > 0);
+        let mut i = self.buffer.len();
+        if i > 1 {
             i -= 1;
-        }
+            while self.buffer[i] == 0xFF {
+                assert!(i > 0);
+                i -= 1;
+            }
 
-        self.writer.write_all(&self.buffer[..i])?;
-        self.buffer.drain(..i);
+            self.writer.write_all(&self.buffer[..i])?;
+            self.buffer.drain(..i);
+        }
 
         Ok(())
     }
 }
 
 #[cfg(test)]
-use super::vpx_bool_reader::VPXBoolReader;
+use crate::structs::vpx_bool_reader::VPXBoolReader;
 
 #[test]
 fn test_roundtrip_vpxboolwriter_n_bits() {
@@ -294,7 +367,7 @@ fn test_roundtrip_vpxboolwriter_n_bits() {
 
 #[test]
 fn test_roundtrip_vpxboolwriter_unary() {
-    const MAX_UNARY: usize = 8;
+    const MAX_UNARY: usize = 11; // the size used in Lepton
 
     #[derive(Default)]
     struct BranchData {
@@ -369,7 +442,7 @@ fn test_roundtrip_vpxboolwriter_single_bit() {
 
     for i in 0..1024 {
         writer
-            .put(i % 10 == 0, &mut branch, ModelComponent::Dummy)
+            .put_bit(i % 10 == 0, &mut branch, ModelComponent::Dummy)
             .unwrap();
     }
 
@@ -379,7 +452,7 @@ fn test_roundtrip_vpxboolwriter_single_bit() {
 
     let mut reader = VPXBoolReader::new(&buffer[..]).unwrap();
     for i in 0..1024 {
-        let read_value = reader.get(&mut branch, ModelComponent::Dummy).unwrap();
+        let read_value = reader.get_bit(&mut branch, ModelComponent::Dummy).unwrap();
         assert_eq!(read_value, i % 10 == 0);
     }
 }

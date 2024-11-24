@@ -4,36 +4,33 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::{Context, Result};
-
-use bytemuck::cast_mut;
-use wide::i32x8;
-
-use default_boxed::DefaultBoxed;
-
 use std::cmp;
 use std::io::Read;
 
+use bytemuck::cast_mut;
+use default_boxed::DefaultBoxed;
+use wide::i32x8;
+
 use crate::consts::UNZIGZAG_49_TR;
 use crate::enabled_features::EnabledFeatures;
-use crate::helpers::{err_exit_code, here, u16_bit_length};
-use crate::lepton_error::ExitCode;
-
+use crate::helpers::u16_bit_length;
+use crate::lepton_error::{err_exit_code, AddContext, ExitCode};
 use crate::metrics::Metrics;
-use crate::structs::{
-    block_based_image::AlignedBlock, block_based_image::BlockBasedImage, model::Model,
-    model::ModelPerColor, neighbor_summary::NeighborSummary, probability_tables::ProbabilityTables,
-    probability_tables_set::ProbabilityTablesSet, quantization_tables::QuantizationTables,
-    row_spec::RowSpec, truncate_components::*, vpx_bool_reader::VPXBoolReader,
-};
-
-use super::block_context::{BlockContext, NeighborData};
+use crate::structs::block_based_image::{AlignedBlock, BlockBasedImage};
+use crate::structs::block_context::{BlockContext, NeighborData};
+use crate::structs::model::{Model, ModelPerColor};
+use crate::structs::neighbor_summary::NeighborSummary;
+use crate::structs::probability_tables::ProbabilityTables;
+use crate::structs::quantization_tables::QuantizationTables;
+use crate::structs::row_spec::RowSpec;
+use crate::structs::truncate_components::*;
+use crate::structs::vpx_bool_reader::VPXBoolReader;
+use crate::Result;
 
 // reads stream from reader and populates image_data with the decoded data
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 pub fn lepton_decode_row_range<R: Read>(
-    pts: &ProbabilityTablesSet,
     qt: &[QuantizationTables],
     trunc: &TruncateComponents,
     image_data: &mut [BlockBasedImage],
@@ -92,20 +89,34 @@ pub fn lepton_decode_row_range<R: Read>(
             continue;
         }
 
+        let left_model;
+        let middle_model;
+
+        let component = cur_row.component;
+        if is_top_row[component] {
+            is_top_row[component] = false;
+
+            left_model = &super::probability_tables::NO_NEIGHBORS;
+            middle_model = &super::probability_tables::LEFT_ONLY;
+        } else {
+            left_model = &super::probability_tables::TOP_ONLY;
+            middle_model = &super::probability_tables::ALL;
+        }
+
         decode_row_wrapper(
             &mut model,
             &mut bool_reader,
-            pts,
-            &mut image_data[cur_row.component],
-            &qt[cur_row.component],
-            &mut neighbor_summary_cache[cur_row.component],
-            &mut is_top_row[..],
-            &component_size_in_blocks[..],
-            cur_row.component,
+            left_model,
+            middle_model,
+            ProbabilityTables::get_color_index(component),
+            &mut image_data[component],
+            &qt[component],
+            &mut neighbor_summary_cache[component],
             cur_row.curr_y,
+            component_size_in_blocks[component],
             features,
         )
-        .context(here!())?;
+        .context()?;
     }
     Ok(bool_reader.drain_stats())
 }
@@ -114,130 +125,53 @@ pub fn lepton_decode_row_range<R: Read>(
 fn decode_row_wrapper<R: Read>(
     model: &mut Model,
     bool_reader: &mut VPXBoolReader<R>,
-    pts: &ProbabilityTablesSet,
-    image_data: &mut BlockBasedImage,
-    qt: &QuantizationTables,
-    neighbor_summary_cache: &mut Vec<NeighborSummary>,
-    is_top_row: &mut [bool],
-    component_size_in_blocks: &[i32],
-    component: usize,
-    curr_y: i32,
-    features: &EnabledFeatures,
-) -> Result<()> {
-    let mut context = image_data.off_y(curr_y);
-
-    let block_width = image_data.get_block_width();
-    if is_top_row[component] {
-        is_top_row[component] = false;
-        decode_row(
-            model,
-            bool_reader,
-            &qt,
-            &pts.corner[component],
-            &pts.top[component],
-            &pts.top[component],
-            image_data,
-            &mut context,
-            neighbor_summary_cache,
-            component_size_in_blocks[component],
-            features,
-        )
-        .context(here!())?;
-    } else if block_width > 1 {
-        let _bt = component;
-        decode_row(
-            model,
-            bool_reader,
-            &qt,
-            &pts.mid_left[component],
-            &pts.middle[component],
-            &pts.mid_right[component],
-            image_data,
-            &mut context,
-            neighbor_summary_cache,
-            component_size_in_blocks[component],
-            features,
-        )
-        .context(here!())?;
-    } else {
-        assert!(block_width == 1, "block_width == 1");
-        decode_row(
-            model,
-            bool_reader,
-            &qt,
-            &pts.width_one[component],
-            &pts.width_one[component],
-            &pts.width_one[component],
-            image_data,
-            &mut context,
-            neighbor_summary_cache,
-            component_size_in_blocks[component],
-            features,
-        )
-        .context(here!())?;
-    }
-
-    Ok(())
-}
-
-fn decode_row<R: Read>(
-    model: &mut Model,
-    bool_reader: &mut VPXBoolReader<R>,
-    qt: &QuantizationTables,
     left_model: &ProbabilityTables,
     middle_model: &ProbabilityTables,
-    right_model: &ProbabilityTables,
+    color_index: usize,
     image_data: &mut BlockBasedImage,
-    block_context: &mut BlockContext,
+    qt: &QuantizationTables,
     neighbor_summary_cache: &mut [NeighborSummary],
+    curr_y: i32,
     component_size_in_blocks: i32,
     features: &EnabledFeatures,
 ) -> Result<()> {
+    let mut block_context = image_data.off_y(curr_y);
+
     let block_width = image_data.get_block_width();
-    if block_width > 0 {
-        parse_token::<R, false>(
-            model,
-            bool_reader,
-            image_data,
-            block_context,
-            neighbor_summary_cache,
-            qt,
-            left_model,
-            features,
-        )
-        .context(here!())?;
-        let offset = block_context.next();
 
-        if offset >= component_size_in_blocks {
-            return Ok(()); // no sure if this is an error
-        }
-    }
+    for jpeg_x in 0..block_width {
+        let pt = if jpeg_x == 0 {
+            left_model
+        } else {
+            middle_model
+        };
 
-    for _jpeg_x in 1..block_width - 1 {
-        if middle_model.is_all_present() {
+        if pt.is_all_present() {
             parse_token::<R, true>(
                 model,
                 bool_reader,
                 image_data,
-                block_context,
+                &block_context,
                 neighbor_summary_cache,
                 qt,
-                middle_model,
+                pt,
+                color_index,
                 features,
             )
-            .context(here!())?;
+            .context()?;
         } else {
             parse_token::<R, false>(
                 model,
                 bool_reader,
                 image_data,
-                block_context,
+                &block_context,
                 neighbor_summary_cache,
                 qt,
-                middle_model,
+                pt,
+                color_index,
                 features,
             )
-            .context(here!())?;
+            .context()?;
         }
 
         let offset = block_context.next();
@@ -247,35 +181,6 @@ fn decode_row<R: Read>(
         }
     }
 
-    if block_width > 1 {
-        if right_model.is_all_present() {
-            parse_token::<R, true>(
-                model,
-                bool_reader,
-                image_data,
-                block_context,
-                neighbor_summary_cache,
-                qt,
-                right_model,
-                features,
-            )
-            .context(here!())?;
-        } else {
-            parse_token::<R, false>(
-                model,
-                bool_reader,
-                image_data,
-                block_context,
-                neighbor_summary_cache,
-                qt,
-                right_model,
-                features,
-            )
-            .context(here!())?;
-        }
-
-        block_context.next();
-    }
     Ok(())
 }
 
@@ -284,10 +189,11 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
     model: &mut Model,
     bool_reader: &mut VPXBoolReader<R>,
     image_data: &mut BlockBasedImage,
-    context: &mut BlockContext,
+    context: &BlockContext,
     neighbor_summary_cache: &mut [NeighborSummary],
     qt: &QuantizationTables,
     pt: &ProbabilityTables,
+    color_index: usize,
     features: &EnabledFeatures,
 ) -> Result<()> {
     debug_assert!(pt.is_all_present() == ALL_PRESENT);
@@ -295,8 +201,15 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
     let neighbors =
         context.get_neighbor_data::<ALL_PRESENT>(image_data, neighbor_summary_cache, pt);
 
-    let (output, ns) =
-        read_coefficient_block::<ALL_PRESENT, R>(pt, &neighbors, model, bool_reader, qt, features)?;
+    let (output, ns) = read_coefficient_block::<ALL_PRESENT, R>(
+        pt,
+        color_index,
+        &neighbors,
+        model,
+        bool_reader,
+        qt,
+        features,
+    )?;
 
     context.set_neighbor_summary_here(neighbor_summary_cache, ns);
 
@@ -312,13 +225,14 @@ fn parse_token<R: Read, const ALL_PRESENT: bool>(
 /// image data, etc so it can be extensively unit tested.
 pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
     pt: &ProbabilityTables,
+    color_index: usize,
     neighbor_data: &NeighborData,
     model: &mut Model,
     bool_reader: &mut VPXBoolReader<R>,
     qt: &QuantizationTables,
     features: &EnabledFeatures,
 ) -> Result<(AlignedBlock, NeighborSummary)> {
-    let model_per_color = model.get_per_color(pt);
+    let model_per_color = model.get_per_color(color_index);
 
     // First we read the 49 inner coefficients
 
@@ -328,9 +242,8 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
 
     // read how many of these are non-zero, which is used both
     // to terminate the loop early and as a predictor for the model
-    let num_non_zeros_7x7 = model_per_color
-        .read_non_zero_7x7_count(bool_reader, num_non_zeros_7x7_context_bin)
-        .context(here!())?;
+    let num_non_zeros_7x7 =
+        model_per_color.read_non_zero_7x7_count(bool_reader, num_non_zeros_7x7_context_bin)?;
 
     if num_non_zeros_7x7 > 49 {
         // most likely a stream or model synchronization error
@@ -363,14 +276,12 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
         for (zig49, &coord_tr) in UNZIGZAG_49_TR.iter().enumerate() {
             let best_prior_bit_length = u16_bit_length(best_priors[coord_tr as usize]);
 
-            let coef = model_per_color
-                .read_coef(
-                    bool_reader,
-                    zig49,
-                    num_non_zeros_bin,
-                    best_prior_bit_length as usize,
-                )
-                .context(here!())?;
+            let coef = model_per_color.read_coef(
+                bool_reader,
+                zig49,
+                num_non_zeros_bin,
+                best_prior_bit_length as usize,
+            )?;
 
             if coef != 0 {
                 // here we calculate the furthest x and y coordinates that have non-zero coefficients
@@ -426,14 +337,13 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
     let q0 = qt.get_quantization_table()[0] as i32;
     let predicted_dc = pt.adv_predict_dc_pix::<ALL_PRESENT>(&raster, q0, &neighbor_data, features);
 
-    let coef = model
-        .read_dc(
-            bool_reader,
-            pt.get_color_index(),
-            predicted_dc.uncertainty,
-            predicted_dc.uncertainty2,
-        )
-        .context(here!())?;
+    let coef = model.read_dc(
+        bool_reader,
+        color_index,
+        predicted_dc.uncertainty,
+        predicted_dc.uncertainty2,
+    )?;
+
     output.set_dc(ProbabilityTables::adv_predict_or_unpredict_dc(
         coef,
         true,
@@ -442,12 +352,12 @@ pub fn read_coefficient_block<const ALL_PRESENT: bool, R: Read>(
 
     // neighbor summary is used as a predictor for the next block
     let neighbor_summary = NeighborSummary::new(
-        &predicted_dc.advanced_predict_dc_pixels_sans_dc,
+        predicted_dc.next_edge_pixels_h,
+        predicted_dc.next_edge_pixels_v,
         output.get_dc() as i32 * q0,
         num_non_zeros_7x7,
         horiz_pred,
         vert_pred,
-        features,
     );
 
     Ok((output, neighbor_summary))
@@ -514,7 +424,7 @@ fn decode_one_edge<R: Read, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
 ) -> Result<()> {
     let mut num_non_zeros_edge = model_per_color
         .read_non_zero_edge_count::<R, HORIZONTAL>(bool_reader, est_eob, num_non_zeros_bin)
-        .context(here!())?;
+        .context()?;
 
     let delta;
     let mut zig15offset;

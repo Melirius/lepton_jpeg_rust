@@ -7,7 +7,7 @@
 use bytemuck::cast;
 use wide::{i16x8, i32x8};
 
-use super::block_based_image::AlignedBlock;
+use crate::structs::block_based_image::AlignedBlock;
 
 const _W1: i32 = 2841; // 2048*sqrt(2)*cos(1*pi/16)
 const _W2: i32 = 2676; // 2048*sqrt(2)*cos(2*pi/16)
@@ -133,7 +133,7 @@ use bytemuck::cast_ref;
 
 #[cfg(test)]
 #[inline(always)]
-pub fn get_q(offset: usize, q_transposed: &AlignedBlock) -> i32x8 {
+fn get_q(offset: usize, q_transposed: &AlignedBlock) -> i32x8 {
     use wide::u16x8;
 
     let rows: &[u16x8; 8] = cast_ref(q_transposed.get_block());
@@ -142,7 +142,7 @@ pub fn get_q(offset: usize, q_transposed: &AlignedBlock) -> i32x8 {
 
 #[cfg(test)]
 #[inline(always)]
-pub fn get_c(offset: usize, q_transposed: &AlignedBlock) -> i32x8 {
+fn get_c(offset: usize, q_transposed: &AlignedBlock) -> i32x8 {
     let rows: &[i16x8; 8] = cast_ref(q_transposed.get_block());
     i32x8::from_i16x8(rows[offset])
 }

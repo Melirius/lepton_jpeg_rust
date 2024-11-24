@@ -4,10 +4,9 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use super::block_based_image::{AlignedBlock, BlockBasedImage, EMPTY_BLOCK};
-use super::neighbor_summary::{NeighborSummary, NEIGHBOR_DATA_EMPTY};
-use super::probability_tables::ProbabilityTables;
-
+use crate::structs::block_based_image::{AlignedBlock, BlockBasedImage, EMPTY_BLOCK};
+use crate::structs::neighbor_summary::{NeighborSummary, NEIGHBOR_DATA_EMPTY};
+use crate::structs::probability_tables::ProbabilityTables;
 pub struct BlockContext {
     cur_block_index: i32,
     above_block_index: i32,
@@ -96,7 +95,7 @@ impl BlockContext {
     }
 
     pub fn set_neighbor_summary_here(
-        &mut self,
+        &self,
         neighbor_summary_cache: &mut [NeighborSummary],
         neighbor_summary: NeighborSummary,
     ) {

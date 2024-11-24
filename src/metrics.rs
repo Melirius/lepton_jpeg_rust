@@ -1,4 +1,5 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
+use std::time::Duration;
 
 #[cfg(windows)]
 use cpu_time::ThreadTime;
@@ -66,7 +67,7 @@ pub struct Metrics {
 
 impl Metrics {
     #[allow(dead_code)]
-    fn record_compression_stats(
+    pub fn record_compression_stats(
         &mut self,
         cmp: ModelComponent,
         total_bits: i64,

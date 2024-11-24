@@ -1,5 +1,5 @@
 // features that are enabled in the encoder. Turn off for potential backward compat issues.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct EnabledFeatures {
     /// enables/disables reading of progressive images
     pub progressive: bool,
@@ -21,6 +21,12 @@ pub struct EnabledFeatures {
 
     /// Accept JPEG files that have invalid DHT tables
     pub accept_invalid_dht: bool,
+
+    /// number of threads used for encoding/decoding
+    pub max_threads: u32,
+
+    /// maximum size of a jpeg file
+    pub max_jpeg_file_size: u32,
 }
 
 impl EnabledFeatures {
@@ -35,6 +41,8 @@ impl EnabledFeatures {
             use_16bit_dc_estimate: true,
             use_16bit_adv_predict: true,
             accept_invalid_dht: false,
+            max_threads: 8,
+            max_jpeg_file_size: 128 * 1024 * 1024,
         }
     }
 
@@ -50,6 +58,8 @@ impl EnabledFeatures {
             use_16bit_dc_estimate: false,
             use_16bit_adv_predict: false,
             accept_invalid_dht: true,
+            max_threads: 8,
+            max_jpeg_file_size: 128 * 1024 * 1024,
         }
     }
 
@@ -65,6 +75,8 @@ impl EnabledFeatures {
             use_16bit_dc_estimate: true,
             use_16bit_adv_predict: true,
             accept_invalid_dht: true,
+            max_threads: 8,
+            max_jpeg_file_size: 128 * 1024 * 1024,
         }
     }
 }

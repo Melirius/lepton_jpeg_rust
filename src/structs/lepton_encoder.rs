@@ -4,34 +4,31 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-use anyhow::{Context, Result};
-use bytemuck::cast;
-use wide::i32x8;
-
 use std::cmp;
 use std::io::Write;
+
+use bytemuck::cast;
+use default_boxed::DefaultBoxed;
+use wide::i32x8;
 
 use crate::consts::UNZIGZAG_49_TR;
 use crate::enabled_features::EnabledFeatures;
 use crate::helpers::*;
-use crate::lepton_error::ExitCode;
-
+use crate::lepton_error::{err_exit_code, AddContext, ExitCode};
 use crate::metrics::Metrics;
-use crate::structs::{
-    block_based_image::AlignedBlock, block_based_image::BlockBasedImage,
-    block_context::BlockContext, model::Model, model::ModelPerColor,
-    neighbor_summary::NeighborSummary, probability_tables::ProbabilityTables,
-    probability_tables_set::ProbabilityTablesSet, quantization_tables::QuantizationTables,
-    row_spec::RowSpec, truncate_components::*, vpx_bool_writer::VPXBoolWriter,
-};
-
-use default_boxed::DefaultBoxed;
-
-use super::block_context::NeighborData;
+use crate::structs::block_based_image::{AlignedBlock, BlockBasedImage};
+use crate::structs::block_context::{BlockContext, NeighborData};
+use crate::structs::model::{Model, ModelPerColor};
+use crate::structs::neighbor_summary::NeighborSummary;
+use crate::structs::probability_tables::ProbabilityTables;
+use crate::structs::quantization_tables::QuantizationTables;
+use crate::structs::row_spec::RowSpec;
+use crate::structs::truncate_components::*;
+use crate::structs::vpx_bool_writer::VPXBoolWriter;
+use crate::Result;
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 pub fn lepton_encode_row_range<W: Write>(
-    pts: &ProbabilityTablesSet,
     quantization_tables: &[QuantizationTables],
     image_data: &[BlockBasedImage],
     writer: &mut W,
@@ -91,66 +88,37 @@ pub fn lepton_encode_row_range<W: Write>(
         }
 
         // Advance to next row to cache expended block data for current row. Should be called before getting block context.
-        let bt = cur_row.component;
+        let component = cur_row.component;
 
-        let mut block_context = image_data[bt].off_y(cur_row.curr_y);
+        let left_model;
+        let middle_model;
 
-        let block_width = image_data[bt].get_block_width();
+        if is_top_row[component] {
+            is_top_row[component] = false;
 
-        if is_top_row[bt] {
-            is_top_row[bt] = false;
-            process_row(
-                &mut model,
-                &mut bool_writer,
-                &image_data[bt],
-                &quantization_tables[bt],
-                &pts.corner[bt],
-                &pts.top[bt],
-                &pts.top[bt],
-                colldata,
-                &mut block_context,
-                &mut neighbor_summary_cache[bt][..],
-                block_width,
-                component_size_in_blocks[bt],
-                features,
-            )
-            .context(here!())?;
-        } else if block_width > 1 {
-            process_row(
-                &mut model,
-                &mut bool_writer,
-                &image_data[bt],
-                &quantization_tables[bt],
-                &pts.mid_left[bt],
-                &pts.middle[bt],
-                &pts.mid_right[bt],
-                colldata,
-                &mut block_context,
-                &mut neighbor_summary_cache[bt][..],
-                block_width,
-                component_size_in_blocks[bt],
-                features,
-            )
-            .context(here!())?;
+            left_model = &super::probability_tables::NO_NEIGHBORS;
+            middle_model = &super::probability_tables::LEFT_ONLY;
         } else {
-            assert!(block_width == 1, "block_width == 1");
-            process_row(
-                &mut model,
-                &mut bool_writer,
-                &image_data[bt],
-                &quantization_tables[bt],
-                &pts.width_one[bt],
-                &pts.width_one[bt],
-                &pts.width_one[bt],
-                colldata,
-                &mut block_context,
-                &mut neighbor_summary_cache[bt][..],
-                block_width,
-                component_size_in_blocks[bt],
-                features,
-            )
-            .context(here!())?;
+            left_model = &super::probability_tables::TOP_ONLY;
+            middle_model = &super::probability_tables::ALL;
         }
+
+        process_row(
+            &mut model,
+            &mut bool_writer,
+            left_model,
+            middle_model,
+            ProbabilityTables::get_color_index(component),
+            &image_data[component],
+            &quantization_tables[component],
+            &mut neighbor_summary_cache[component][..],
+            cur_row.curr_y,
+            component_size_in_blocks[component],
+            features,
+        )
+        .context()?;
+
+        bool_writer.flush_non_final_data().context()?;
     }
 
     if is_last_thread && full_file_compression {
@@ -172,7 +140,7 @@ pub fn lepton_encode_row_range<W: Write>(
         );
     }
 
-    bool_writer.finish().context(here!())?;
+    bool_writer.finish().context()?;
 
     Ok(bool_writer.drain_stats())
 }
@@ -181,110 +149,72 @@ pub fn lepton_encode_row_range<W: Write>(
 fn process_row<W: Write>(
     model: &mut Model,
     bool_writer: &mut VPXBoolWriter<W>,
-    image_data: &BlockBasedImage,
-    qt: &QuantizationTables,
     left_model: &ProbabilityTables,
     middle_model: &ProbabilityTables,
-    right_model: &ProbabilityTables,
-    _colldata: &TruncateComponents,
-    state: &mut BlockContext,
+    color_index: usize,
+    image_data: &BlockBasedImage,
+    qt: &QuantizationTables,
     neighbor_summary_cache: &mut [NeighborSummary],
-    block_width: i32,
+    curr_y: i32,
     component_size_in_block: i32,
     features: &EnabledFeatures,
 ) -> Result<()> {
-    if block_width > 0 {
-        serialize_tokens::<W, false>(
-            state,
-            qt,
-            left_model,
-            model,
-            image_data,
-            neighbor_summary_cache,
-            bool_writer,
-            features,
-        )
-        .context(here!())?;
-        let offset = state.next();
+    let mut block_context = image_data.off_y(curr_y);
+    let block_width = image_data.get_block_width();
 
-        if offset >= component_size_in_block {
-            return Ok(());
-        }
-    }
+    for jpeg_x in 0..block_width {
+        let pt: &ProbabilityTables = if jpeg_x == 0 {
+            left_model
+        } else {
+            middle_model
+        };
 
-    for _jpeg_x in 1..block_width - 1 {
         // shortcut all the checks for the presence of left/right components by passing a constant generic parameter
-        if middle_model.is_all_present() {
+        if pt.is_all_present() {
             serialize_tokens::<W, true>(
-                state,
+                &block_context,
                 qt,
-                middle_model,
+                pt,
                 model,
+                color_index,
                 image_data,
                 neighbor_summary_cache,
                 bool_writer,
                 features,
             )
-            .context(here!())?;
+            .context()?;
         } else {
             serialize_tokens::<W, false>(
-                state,
+                &block_context,
                 qt,
-                middle_model,
+                pt,
                 model,
+                color_index,
                 image_data,
                 neighbor_summary_cache,
                 bool_writer,
                 features,
             )
-            .context(here!())?;
+            .context()?;
         }
 
-        let offset = state.next();
+        let offset = block_context.next();
 
         if offset >= component_size_in_block {
             return Ok(());
         }
     }
 
-    if block_width > 1 {
-        if right_model.is_all_present() {
-            serialize_tokens::<W, true>(
-                state,
-                qt,
-                right_model,
-                model,
-                image_data,
-                neighbor_summary_cache,
-                bool_writer,
-                features,
-            )
-            .context(here!())?;
-        } else {
-            serialize_tokens::<W, false>(
-                state,
-                qt,
-                right_model,
-                model,
-                image_data,
-                neighbor_summary_cache,
-                bool_writer,
-                features,
-            )
-            .context(here!())?;
-        }
-
-        state.next();
-    }
     Ok(())
 }
 
 #[inline(never)] // don't inline so that the profiler can get proper data
 fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
-    context: &mut BlockContext,
+    context: &BlockContext,
     qt: &QuantizationTables,
     pt: &ProbabilityTables,
     model: &mut Model,
+    color_index: usize,
     image_data: &BlockBasedImage,
     neighbor_summary_cache: &mut [NeighborSummary],
     bool_writer: &mut VPXBoolWriter<W>,
@@ -306,6 +236,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 
     let ns = write_coefficient_block::<ALL_PRESENT, W>(
         pt,
+        color_index,
         &neighbors,
         block,
         model,
@@ -326,6 +257,7 @@ fn serialize_tokens<W: Write, const ALL_PRESENT: bool>(
 /// image data, etc so it can be extensively unit tested.
 pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
     pt: &ProbabilityTables,
+    color_index: usize,
     neighbors_data: &NeighborData,
     here_tr: &AlignedBlock,
     model: &mut Model,
@@ -333,7 +265,7 @@ pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
     qt: &QuantizationTables,
     features: &EnabledFeatures,
 ) -> Result<NeighborSummary> {
-    let model_per_color = model.get_per_color(pt);
+    let model_per_color = model.get_per_color(color_index);
 
     // First we encode the 49 inner coefficients
 
@@ -351,7 +283,7 @@ pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
             num_non_zeros_7x7_context_bin,
             num_non_zeros_7x7,
         )
-        .context(here!())?;
+        .context()?;
 
     // these are used as predictors for the number of non-zero edge coefficients
     // do math in 32 bits since this is faster on most modern platforms
@@ -384,7 +316,7 @@ pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
                     num_non_zeros_remaining_bin,
                     best_prior_bit_length as usize,
                 )
-                .context(here!())?;
+                .context()?;
 
             if coef != 0 {
                 // here we calculate the furthest x and y coordinates that have non-zero coefficients
@@ -423,7 +355,7 @@ pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
         eob_x as u8,
         eob_y as u8,
     )
-    .context(here!())?;
+    .context()?;
 
     // finally the DC coefficient (at 0,0)
     let q0 = qt.get_quantization_table()[0] as i32;
@@ -449,21 +381,21 @@ pub fn write_coefficient_block<const ALL_PRESENT: bool, W: Write>(
     model
         .write_dc(
             bool_writer,
-            pt.get_color_index(),
+            color_index,
             avg_predicted_dc as i16,
             predicted_val.uncertainty,
             predicted_val.uncertainty2,
         )
-        .context(here!())?;
+        .context()?;
 
     // neighbor summary is used as a predictor for the next block
     let neighbor_summary = NeighborSummary::new(
-        &predicted_val.advanced_predict_dc_pixels_sans_dc,
+        predicted_val.next_edge_pixels_h,
+        predicted_val.next_edge_pixels_v,
         here_tr.get_dc() as i32 * q0,
         num_non_zeros_7x7,
         horiz_pred,
         vert_pred,
-        features,
     );
 
     Ok(neighbor_summary)
@@ -506,7 +438,7 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
         num_non_zeros_bin,
         eob_x,
     )
-    .context(here!())?;
+    .context()?;
 
     encode_one_edge::<W, ALL_PRESENT, false>(
         here_tr,
@@ -518,7 +450,7 @@ fn encode_edge<W: Write, const ALL_PRESENT: bool>(
         num_non_zeros_bin,
         eob_y,
     )
-    .context(here!())?;
+    .context()?;
 
     // prepare predictors for edge coefficients of the blocks below and to the right of current one
     let (next_horiz_pred, next_vert_pred) = ProbabilityTables::predict_next_edges(&raster);
@@ -571,7 +503,7 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
             num_non_zeros_bin,
             num_non_zeros_edge,
         )
-        .context(here!())?;
+        .context()?;
 
     let delta;
     let mut zig15offset;
@@ -605,7 +537,7 @@ fn encode_one_edge<W: Write, const ALL_PRESENT: bool, const HORIZONTAL: bool>(
                 num_non_zeros_edge,
                 best_prior,
             )
-            .context(here!())?;
+            .context()?;
 
         if coef != 0 {
             num_non_zeros_edge -= 1;
@@ -630,7 +562,7 @@ fn roundtrip_zeros() {
         &block,
         &block,
         [1; 64],
-        0xd7c55f4988eaf7d5,
+        0x4154B63BDE6F2912,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -647,7 +579,7 @@ fn roundtrip_dc_only() {
         &block,
         &block,
         [1; 64],
-        0x2dcc28548ce40dec,
+        0x2556719DE605BB41,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -667,7 +599,7 @@ fn roundtrip_edges_only() {
         &block,
         &block,
         [1; 64],
-        0x60cb33137d9ba75f,
+        0x91061AE0FBE7C626,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -691,7 +623,7 @@ fn roundtrip_ac_only() {
         &block,
         &block,
         [1; 64],
-        0x782acca7e2ee50a3,
+        0x9F5637364D41FE11,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -706,7 +638,7 @@ fn roundtrip_ones() {
         &block,
         &block,
         [1; 64],
-        0xd986b8703f95c0fd,
+        0x6B2A9E7E1DA9A4B3,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -724,7 +656,7 @@ fn roundtrip_large_coef() {
         &block,
         &block,
         [1; 64],
-        0x9e97dff50bc0188,
+        0x95CBDD4F7D7B72EB,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 
@@ -738,7 +670,7 @@ fn roundtrip_large_coef() {
         &block,
         &block,
         [65535; 64],
-        0xcac19d7e86aece1b,
+        0xE514715BD531D80E,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -768,7 +700,7 @@ fn roundtrip_random_seed() {
         &above_left,
         &here,
         qt,
-        0xe3c687262f0df4f5,
+        0x146C568A90EB0F14,
         &EnabledFeatures::compat_lepton_scalar_read(),
     );
 
@@ -779,7 +711,7 @@ fn roundtrip_random_seed() {
         &above_left,
         &here,
         qt,
-        0xdbacb31b714489fc,
+        0x12ECA3C71A29300C,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 
@@ -805,7 +737,7 @@ fn roundtrip_unique() {
         &above_left,
         &here,
         [1; 64],
-        0x36f907a4d7f80559,
+        0x8FA72ED7E5961A1C,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -833,7 +765,7 @@ fn roundtrip_non_zeros_counts() {
         &block,
         &block,
         [1; 64],
-        0xb4031bacdb0c911b,
+        0x6C93F3EF5495440B,
         &EnabledFeatures::compat_lepton_vector_read(),
     );
 }
@@ -850,7 +782,7 @@ fn make_random_model() -> Box<Model> {
     let mut rng = crate::helpers::get_rand_from_seed([2u8; 32]);
 
     model.walk(|x| {
-        x.set_count(rng.gen_range(0x101..=0xffff));
+        x.set_count(rng.gen_range(0x01..=0xff) * 256 + rng.gen_range(0x01..=0xff));
     });
     model
 }
@@ -872,15 +804,16 @@ fn roundtrip_read_write_coefficients(
     verified_output: u64,
     features: &EnabledFeatures,
 ) -> u64 {
-    use crate::structs::{
-        block_based_image::EMPTY_BLOCK, lepton_decoder::read_coefficient_block,
-        neighbor_summary::NEIGHBOR_DATA_EMPTY, vpx_bool_reader::VPXBoolReader,
-    };
+    use std::hash::Hasher;
+    use std::io::{Cursor, Read};
 
     // use the Sip hasher directly since that's guaranteed not to change implementation vs the default hasher
     use siphasher::sip::SipHasher13;
-    use std::hash::Hasher;
-    use std::io::{Cursor, Read};
+
+    use crate::structs::block_based_image::EMPTY_BLOCK;
+    use crate::structs::lepton_decoder::read_coefficient_block;
+    use crate::structs::neighbor_summary::NEIGHBOR_DATA_EMPTY;
+    use crate::structs::vpx_bool_reader::VPXBoolReader;
 
     let mut write_model = make_random_model();
 
@@ -895,13 +828,14 @@ fn roundtrip_read_write_coefficients(
         left: Option<(&AlignedBlock, &NeighborSummary)>,
         above: Option<(&AlignedBlock, &NeighborSummary)>,
         above_left: Option<&AlignedBlock>,
+        color_index: usize,
         here: &AlignedBlock,
         write_model: &mut Model,
         bool_writer: &mut VPXBoolWriter<W>,
         qt: &QuantizationTables,
         features: &EnabledFeatures,
     ) -> NeighborSummary {
-        let pt = ProbabilityTables::new(0, left.is_some(), above.is_some());
+        let pt = ProbabilityTables::new(left.is_some(), above.is_some());
         let n = NeighborData {
             above: &above.map(|x| x.0).unwrap_or(&EMPTY_BLOCK).transpose(),
             left: &left.map(|x| x.0).unwrap_or(&EMPTY_BLOCK).transpose(),
@@ -916,6 +850,7 @@ fn roundtrip_read_write_coefficients(
         if left.is_some() && above.is_some() {
             write_coefficient_block::<true, _>(
                 &pt,
+                color_index,
                 &n,
                 &here_tr,
                 write_model,
@@ -927,6 +862,7 @@ fn roundtrip_read_write_coefficients(
         } else {
             write_coefficient_block::<false, _>(
                 &pt,
+                color_index,
                 &n,
                 &here_tr,
                 write_model,
@@ -943,12 +879,13 @@ fn roundtrip_read_write_coefficients(
         left: Option<(&AlignedBlock, &NeighborSummary)>,
         above: Option<(&AlignedBlock, &NeighborSummary)>,
         above_left: Option<&AlignedBlock>,
+        color_index: usize,
         read_model: &mut Model,
         bool_reader: &mut VPXBoolReader<R>,
         qt: &QuantizationTables,
         features: &EnabledFeatures,
     ) -> (AlignedBlock, NeighborSummary) {
-        let pt = ProbabilityTables::new(0, left.is_some(), above.is_some());
+        let pt = ProbabilityTables::new(left.is_some(), above.is_some());
         let n = NeighborData {
             above: &above.map(|x| x.0).unwrap_or(&EMPTY_BLOCK).transpose(),
             left: &left.map(|x| x.0).unwrap_or(&EMPTY_BLOCK).transpose(),
@@ -959,11 +896,27 @@ fn roundtrip_read_write_coefficients(
 
         // call the right version depending on if we have all neighbors or not
         let r = if left.is_some() && above.is_some() {
-            read_coefficient_block::<true, _>(&pt, &n, read_model, bool_reader, qt, features)
-                .unwrap()
+            read_coefficient_block::<true, _>(
+                &pt,
+                color_index,
+                &n,
+                read_model,
+                bool_reader,
+                qt,
+                features,
+            )
+            .unwrap()
         } else {
-            read_coefficient_block::<false, _>(&pt, &n, read_model, bool_reader, qt, features)
-                .unwrap()
+            read_coefficient_block::<false, _>(
+                &pt,
+                color_index,
+                &n,
+                read_model,
+                bool_reader,
+                qt,
+                features,
+            )
+            .unwrap()
         };
 
         (r.0.transpose(), r.1)
@@ -977,10 +930,13 @@ fn roundtrip_read_write_coefficients(
     //
     // first: above_left (with no neighbors)
 
+    let color_index = 0;
+
     let w_above_left_ns = call_write_coefficient_block(
         None,
         None,
         None,
+        color_index,
         &above_left,
         &mut write_model,
         &mut bool_writer,
@@ -993,6 +949,7 @@ fn roundtrip_read_write_coefficients(
         Some((&above_left, &w_above_left_ns)),
         None,
         None,
+        color_index,
         &above,
         &mut write_model,
         &mut bool_writer,
@@ -1005,6 +962,7 @@ fn roundtrip_read_write_coefficients(
         None,
         Some((&above_left, &w_above_left_ns)),
         None,
+        color_index,
         &left,
         &mut write_model,
         &mut bool_writer,
@@ -1017,6 +975,7 @@ fn roundtrip_read_write_coefficients(
         Some((&left, &w_left_ns)),
         Some((&above, &w_above_ns)),
         Some(above_left),
+        color_index,
         &here,
         &mut write_model,
         &mut bool_writer,
@@ -1034,6 +993,7 @@ fn roundtrip_read_write_coefficients(
         None,
         None,
         None,
+        color_index,
         &mut read_model,
         &mut bool_reader,
         &qt,
@@ -1051,6 +1011,7 @@ fn roundtrip_read_write_coefficients(
         Some((&r_above_left_block, &w_above_left_ns)),
         None,
         None,
+        color_index,
         &mut read_model,
         &mut bool_reader,
         &qt,
@@ -1064,6 +1025,7 @@ fn roundtrip_read_write_coefficients(
         None,
         Some((&r_above_left_block, &r_above_left_ns)),
         None,
+        color_index,
         &mut read_model,
         &mut bool_reader,
         &qt,
@@ -1077,6 +1039,7 @@ fn roundtrip_read_write_coefficients(
         Some((&r_left_block, &r_left_ns)),
         Some((&r_above_block, &r_above_ns)),
         Some(above_left),
+        color_index,
         &mut read_model,
         &mut bool_reader,
         &qt,

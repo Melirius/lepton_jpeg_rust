@@ -4,231 +4,256 @@
  *  This software incorporates material from third parties. See NOTICE.txt for details.
  *--------------------------------------------------------------------------------------------*/
 
-mod consts;
-mod enabled_features;
-mod helpers;
-mod jpeg_code;
-mod lepton_error;
-mod metrics;
-mod structs;
+use std::borrow::Cow;
+use std::env;
+use std::ffi::OsStr;
+use std::fs::{remove_file, File, OpenOptions};
+use std::io::{stdin, stdout, Cursor, IsTerminal, Read, Seek, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use anyhow;
-use anyhow::Context;
-use helpers::err_exit_code;
-use lepton_error::{ExitCode, LeptonError};
 use lepton_jpeg::metrics::CpuTimeMeasure;
-use log::info;
-use simple_logger::SimpleLogger;
-use structs::lepton_format::{decode_as_single_image, read_jpeg};
-#[cfg(all(target_os = "windows", feature = "use_rayon"))]
-use thread_priority::{set_current_thread_priority, ThreadPriority, WinAPIThreadPriority};
-
-use std::{
-    env,
-    fs::{File, OpenOptions},
-    io::{stdin, stdout, BufReader, Cursor, IsTerminal, Read, Seek, Write},
-    time::Duration,
+use lepton_jpeg::{
+    decode_lepton, dump_jpeg, encode_lepton, encode_lepton_verify, EnabledFeatures, ExitCode,
+    LeptonError, Metrics,
 };
+use log::{error, info};
+use simple_logger::SimpleLogger;
 
-use crate::enabled_features::EnabledFeatures;
-use crate::helpers::here;
-use crate::structs::lepton_format::{decode_lepton_wrapper, encode_lepton_wrapper_verify};
-use crate::structs::lepton_header::LeptonHeader;
+#[derive(Copy, Clone, Debug)]
+enum FileType {
+    Jpeg,
+    Lepton,
+}
 
-fn parse_numeric_parameter(arg: &str, name: &str) -> Option<i32> {
-    if arg.starts_with(name) {
-        Some(arg[name.len()..].parse::<i32>().unwrap())
-    } else {
-        None
+fn parse_i32(s: &str) -> Result<i32, &'static str> {
+    s.parse().map_err(|_| "not a number")
+}
+
+fn parse_u32(s: &str) -> Result<u32, &'static str> {
+    s.parse().map_err(|_| "not a number")
+}
+
+fn parse_u64(s: &str) -> Result<u64, &'static str> {
+    s.parse().map_err(|_| "not a number")
+}
+
+fn parse_path(s: &OsStr) -> Result<PathBuf, &'static str> {
+    Ok(PathBuf::from(s))
+}
+
+fn override_if<T>(
+    pargs: &mut pico_args::Arguments,
+    name: &'static str,
+    parse: fn(&str) -> Result<T, &'static str>,
+    value: &mut T,
+) -> Result<(), pico_args::Error> {
+    if let Some(v) = pargs.opt_value_from_fn(name, parse)? {
+        *value = v;
     }
+    Ok(())
 }
 
 // wrap main so that errors get printed nicely without a panic
-fn main_with_result() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
+fn main_with_result() -> Result<(), LeptonError> {
+    let mut pargs = pico_args::Arguments::from_env();
 
-    let mut filenames = Vec::new();
-    let mut num_threads = 8;
-    let mut iterations = 1;
-    let mut dump = false;
-    let mut all = false;
-    let mut overwrite = false;
     let mut enabled_features = EnabledFeatures::compat_lepton_vector_read();
+    let mut filter_level = log::LevelFilter::Info;
+
+    if pargs.contains(["-h", "--help"]) {
+        println!(
+"lepton_jpeg_util - a fast JPEG compressor
+
+Usage: lepton_jpeg_util [options] inputfile [outputfile]
+
+Options:
+    --iter <n>              number of iterations to run
+    --dump                  dump the JPEG file
+    --all                   dump includes the scan lines
+    --cppverify <exe path>  verify the output with the C++ decoder
+    --overwrite             overwrite the output file
+    --corrupt <seed>        randomly corrupt the input file (for testing)
+    --quiet                 suppress all output
+    --noverify              do not verify the output
+    --max-width <n>         maximum width of the JPEG file
+    --max-height <n>        maximum height of the JPEG file
+    --max-jpeg-file-size <n> maximum size of the JPEG file
+    --threads <n>           maximum number of threads to use
+    --rejectprogressive     reject progressive JPEG files
+    --rejectdqtswithzeros   reject DQT tables with zeros
+    --rejectinvalidhuffman  reject invalid Huffman tables
+    --use32bitdc            use 32 bit DC estimate
+    --use32bitadv           use 32 bit advanced prediction
+    --useleptonscalar       use the scalar version of the encoder
+    --highpriority          run on p-cores
+    --lowpriority           run on e-cores
+    --version               print the version
+    --help                  print this help message
+    --verifydir             Recursively verify all files in a directory can be compressed and decompressed
+");
+        return Ok(());
+    }
+
+    let cppverify: Option<PathBuf> = pargs.opt_value_from_os_str("--cppverify", parse_path)?;
+    let verify_dir = pargs.opt_value_from_os_str("--verifydir", parse_path)?;
+
+    let iterations = pargs.opt_value_from_fn("--iter", parse_i32)?.unwrap_or(1);
+    let dump = pargs.contains("--dump");
+    let dumpall = pargs.contains("--dumpall");
+    let verify = !pargs.contains("--noverify");
+    let overwrite = pargs.contains("--overwrite");
+    let mut corrupt = pargs.opt_value_from_fn("--corrupt", parse_u64)?;
+
+    if pargs.contains("--quiet") {
+        filter_level = log::LevelFilter::Warn;
+    }
+
+    override_if(
+        &mut pargs,
+        "--max-width",
+        parse_i32,
+        &mut enabled_features.max_jpeg_width,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--max-height",
+        parse_i32,
+        &mut enabled_features.max_jpeg_height,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--threads",
+        parse_u32,
+        &mut enabled_features.max_threads,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--rejectprogressive",
+        |_| Ok(false),
+        &mut enabled_features.progressive,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--rejectdqtswithzeros",
+        |_| Ok(true),
+        &mut enabled_features.reject_dqts_with_zeros,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--rejectinvalidhuffman",
+        |_| Ok(false),
+        &mut enabled_features.accept_invalid_dht,
+    )?;
+
+    override_if(
+        &mut pargs,
+        "--max-jpeg-file-size",
+        parse_u32,
+        &mut enabled_features.max_jpeg_file_size,
+    )?;
+
+    if pargs.contains("--version") {
+        println!(
+            "compiled library Lepton version {}, git revision: {}",
+            env!("CARGO_PKG_VERSION"),
+            git_version::git_version!(args = ["--abbrev=40", "--always", "--dirty=-modified"])
+        );
+    }
+
+    if pargs.contains("--use32bitdc") {
+        enabled_features.use_16bit_dc_estimate = false;
+    }
+    if pargs.contains("--use32bitadv") {
+        enabled_features.use_16bit_adv_predict = false;
+    }
+    if pargs.contains("--useleptonscalar") {
+        // use both these options if you are trying to read a file that was encoded with the scalar version of the C++ encoder
+        // sadly one old version of the Rust encoder used use_16bit_dc_estimate=false, use_16bit_adv_predict=true
+        // the latest version of the encoder put these options in the header so we ignore this if the file specifies it
+        enabled_features.use_16bit_adv_predict = false;
+        enabled_features.use_16bit_dc_estimate = false;
+    }
+
+    #[cfg(not(feature = "use_rayon"))]
+    if pargs.contains("--highpriority") {
+        // used to force to run on p-cores, make sure this and
+        // any threadpool threads are set to the highest priority
+        lepton_jpeg::set_thread_priority(100);
+    }
+
+    #[cfg(not(feature = "use_rayon"))]
+    if pargs.contains("--lowpriority") {
+        // used to force to run on e-cores, make sure this and
+        // any threadpool threads are set to the lowest priority
+        lepton_jpeg::set_thread_priority(0);
+    }
+
+    let filenames = pargs.finish();
+
+    for i in filenames.iter() {
+        // no other options should be specified only the free standing filenames
+        if i.to_string_lossy().starts_with("-") {
+            return Err(LeptonError::new(
+                ExitCode::SyntaxError,
+                format!("unknown option {:?}", i).as_str(),
+            )
+            .into());
+        }
+    }
+
+    // if we are verifying a directory, then we need to recursively verify all files in the directory
+    if let Some(verify_dir) = verify_dir {
+        execute_verify_dir(
+            &cppverify,
+            &verify_dir.as_path(),
+            &enabled_features,
+            verify,
+            &mut corrupt,
+        )?;
+        return Ok(());
+    }
 
     // only output the log if we are connected to a console (otherwise if there is redirection we would corrupt the file)
     if stdout().is_terminal() {
-        SimpleLogger::new().init().unwrap();
-    }
-
-    for i in 1..args.len() {
-        if args[i].starts_with("-") {
-            if let Some(x) = parse_numeric_parameter(args[i].as_str(), "-threads:") {
-                num_threads = x;
-            } else if let Some(x) = parse_numeric_parameter(args[i].as_str(), "-iter:") {
-                iterations = x;
-            } else if let Some(x) = parse_numeric_parameter(args[i].as_str(), "-max-width:") {
-                enabled_features.max_jpeg_width = x;
-            } else if let Some(x) = parse_numeric_parameter(args[i].as_str(), "-max-height:") {
-                enabled_features.max_jpeg_height = x;
-            } else if args[i] == "-dump" {
-                dump = true;
-            } else if args[i] == "-all" {
-                all = true;
-            } else if args[i] == "-highpriority" {
-                // used to force to run on p-cores, make sure this and
-                // any threadpool threads are set to the high priority
-
-                #[cfg(all(target_os = "windows", feature = "use_rayon"))]
-                {
-                    let priority = ThreadPriority::Os(WinAPIThreadPriority::TimeCritical.into());
-
-                    set_current_thread_priority(priority).unwrap();
-
-                    let b = rayon_core::ThreadPoolBuilder::new();
-                    b.start_handler(move |_| {
-                        set_current_thread_priority(priority).unwrap();
-                    })
-                    .build_global()
-                    .unwrap();
-                }
-            } else if args[i] == "-lowpriority" {
-                // used to force to run on e-cores, make sure this and
-                // any threadpool threads are set to the high priority
-
-                #[cfg(all(target_os = "windows", feature = "use_rayon"))]
-                {
-                    let priority = ThreadPriority::Os(WinAPIThreadPriority::Idle.into());
-
-                    set_current_thread_priority(priority).unwrap();
-
-                    let b = rayon_core::ThreadPoolBuilder::new();
-                    b.start_handler(move |_| {
-                        set_current_thread_priority(priority).unwrap();
-                    })
-                    .build_global()
-                    .unwrap();
-                }
-            } else if args[i] == "-overwrite" {
-                overwrite = true;
-            } else if args[i] == "-noprogressive" {
-                enabled_features.progressive = false;
-            } else if args[i] == "-acceptdqtswithzeros" {
-                enabled_features.reject_dqts_with_zeros = false;
-            } else if args[i] == "-use16bitdc" {
-                enabled_features.use_16bit_dc_estimate = true;
-            } else if args[i] == "-useleptonscalar" {
-                // lepton files that were encoded by the dropbox c++ version compiled in scalar mode
-                enabled_features.use_16bit_adv_predict = false;
-                enabled_features.use_16bit_dc_estimate = false;
-            } else if args[i] == "-useleptonvector" {
-                // lepton files that were encoded by the dropbox c++ version compiled in AVX2/SSE2 mode
-                enabled_features.use_16bit_adv_predict = true;
-                enabled_features.use_16bit_dc_estimate = true;
-            } else {
-                return err_exit_code(
-                    ExitCode::SyntaxError,
-                    format!("unknown switch {0}", args[i]).as_str(),
-                );
-            }
-        } else {
-            filenames.push(args[i].as_str());
-        }
+        SimpleLogger::new().with_level(filter_level).init().unwrap();
     }
 
     if dump {
-        let file_in = File::open(filenames[0]).unwrap();
-        let filelen = file_in.metadata()?.len() as u64;
+        let mut file_in = File::open(filenames[0].as_os_str()).unwrap();
 
-        let mut reader = BufReader::new(file_in);
-
-        let mut lh;
-        let block_image;
-
-        if filenames[0].to_lowercase().ends_with(".jpg") {
-            (lh, block_image) =
-                read_jpeg(&mut reader, &enabled_features, num_threads as usize, |jh| {
-                    println!("parsed header:");
-                    let s = format!("{jh:?}");
-                    println!("{0}", s.replace("},", "},\r\n").replace("],", "],\r\n"));
-                })
-                .context(here!())?;
-        } else {
-            lh = LeptonHeader::new();
-            lh.read_lepton_header(&mut reader, &mut enabled_features)
-                .context(here!())?;
-
-            let _metrics;
-
-            (block_image, _metrics) = decode_as_single_image(
-                &mut lh,
-                &mut reader.take(filelen - 4), // last 4 bytes are the length of the file
-                num_threads as usize,
-                &enabled_features,
-            )
-            .context(here!())?;
-
-            loop {
-                println!("parsed header:");
-                let s = format!("{0:?}", lh.jpeg_header);
-                println!("{0}", s.replace("},", "},\r\n").replace("],", "],\r\n"));
-
-                if !lh
-                    .advance_next_header_segment(&enabled_features)
-                    .context(here!())?
-                {
-                    break;
-                }
-            }
-        }
-
-        let s = format!("{lh:?}");
-        println!("{0}", s.replace("},", "},\r\n").replace("],", "],\r\n"));
-
-        if all {
-            for i in 0..block_image.len() {
-                println!("Component {0}", i);
-                let image = &block_image[i];
-                for dpos in 0..image.get_block_width() * image.get_original_height() {
-                    print!("dpos={0} ", dpos);
-                    let block = image.get_block(dpos);
-
-                    print!("{0}", block.get_transposed_from_zigzag(0));
-                    for i in 1..64 {
-                        print!(",{0}", block.get_transposed_from_zigzag(i));
-                    }
-                    println!();
-                }
-            }
-        }
-
+        let mut contents = Vec::new();
+        file_in.read_to_end(&mut contents).unwrap();
+        dump_jpeg(&contents, dumpall, &enabled_features).unwrap();
         return Ok(());
     }
 
     let mut input_data = Vec::new();
     if filenames.len() != 2 {
         if stdout().is_terminal() || stdin().is_terminal() {
-            return err_exit_code(
+            return Err(LeptonError::new(
                 ExitCode::SyntaxError,
                 "source and destination filename are needed or input needs to be redirected",
-            );
+            )
+            .into());
         }
 
-        std::io::stdin()
-            .read_to_end(&mut input_data)
-            .context(here!())?;
+        std::io::stdin().read_to_end(&mut input_data)?;
     } else {
-        let mut file_in = File::open(filenames[0])
-            .map_err(|e| LeptonError {
-                exit_code: ExitCode::FileNotFound,
-                message: e.to_string(),
-            })
-            .context(here!())?;
+        let mut file_in = File::open(filenames[0].as_os_str())
+            .map_err(|e| LeptonError::new(ExitCode::FileNotFound, e.to_string().as_str()))?;
 
-        file_in.read_to_end(&mut input_data).context(here!())?;
+        file_in.read_to_end(&mut input_data)?;
     }
 
     if input_data.len() < 2 {
-        return err_exit_code(ExitCode::BadLeptonFile, "ERROR input file too small");
+        return Err(LeptonError::new(ExitCode::BadLeptonFile, "ERROR input file too small").into());
     }
 
     let mut metrics;
@@ -237,49 +262,64 @@ fn main_with_result() -> anyhow::Result<()> {
     let mut overall_cpu = Duration::ZERO;
 
     let mut current_iteration = 0;
+
+    // see what file type we have
+    let file_type = if input_data[0] == 0xff && input_data[1] == 0xd8 {
+        FileType::Jpeg
+    } else if input_data[0] == 0xcf && input_data[1] == 0x84 {
+        FileType::Lepton
+    } else {
+        return Err(LeptonError::new(
+            ExitCode::BadLeptonFile,
+            "ERROR input file is not a valid JPEG or Lepton file",
+        )
+        .into());
+    };
+
+    // get a writable version of the input data so we can corrupt it if the user wants to
+    let mut writable_input_data = Cow::from(&input_data);
+
     loop {
         let thread_cpu = CpuTimeMeasure::new();
+        let walltime = Instant::now();
 
-        if input_data[0] == 0xff && input_data[1] == 0xd8 {
-            // the source is a JPEG file, so run the encoder and verify the results
-            (output_data, metrics) = encode_lepton_wrapper_verify(
-                &input_data[..],
-                num_threads as usize,
-                &enabled_features,
-            )
-            .context(here!())?;
+        corrupt_data_if_enabled(&mut corrupt, &mut writable_input_data.to_mut());
 
-            info!(
-                "compressed input {0}, output {1} bytes (ratio = {2:.1}%)",
-                input_data.len(),
-                output_data.len(),
-                ((input_data.len() as f64) / (output_data.len() as f64) - 1.0) * 100.0
-            );
-        } else if input_data[0] == 0xcf && input_data[1] == 0x84 {
-            // the source is a lepton file, so run the decoder
-            let mut reader = Cursor::new(&input_data);
+        // do the encoding/decoding, if we got an error and were corrupting the file, then restore the
+        // original data and continue so we can try corrupting the file in different ways
+        // per iteration
+        match do_work(file_type, verify, &writable_input_data, &enabled_features) {
+            Err(e) => {
+                error!("error {0}", e);
 
-            output_data = Vec::with_capacity(input_data.len());
+                // if we corrupted the image, then restore and continue running
+                if corrupt.is_some() {
+                    // reset the input data not be be corrupt anymore
+                    writable_input_data = Cow::from(&input_data);
+                    output_data = Vec::new();
+                    metrics = Metrics::default();
+                } else {
+                    return Err(e.into());
+                }
+            }
 
-            metrics = decode_lepton_wrapper(
-                &mut reader,
-                &mut output_data,
-                num_threads as usize,
-                &enabled_features,
-            )
-            .context(here!())?;
-        } else {
-            return err_exit_code(
-                ExitCode::BadLeptonFile,
-                "ERROR input file is not a valid JPEG or Lepton file",
-            );
+            Ok((data, m)) => {
+                output_data = data;
+                metrics = m;
+            }
         }
 
-        let iter_duration = thread_cpu.elapsed() + metrics.get_cpu_time_worker_time();
+        let localthread = thread_cpu.elapsed();
+        let workers = metrics.get_cpu_time_worker_time();
 
-        info!("Total CPU time consumed:{0}ms", iter_duration.as_millis());
+        info!(
+            "Main thread CPU: {}ms, Worker thread CPU: {} ms, walltime: {} ms",
+            localthread.as_millis(),
+            workers.as_millis(),
+            walltime.elapsed().as_millis()
+        );
 
-        overall_cpu += iter_duration;
+        overall_cpu += localthread + workers;
 
         current_iteration += 1;
         if current_iteration >= iterations {
@@ -288,19 +328,26 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     if filenames.len() != 2 {
-        std::io::stdout()
-            .write_all(&output_data[..])
-            .context(here!())?
+        std::io::stdout().write_all(&output_data[..])?
     } else {
-        let output_file: String = filenames[1].to_owned();
+        let output_filename = filenames[1].as_os_str();
+
         let mut fileout = OpenOptions::new()
             .write(true)
             .create(overwrite)
             .create_new(!overwrite)
-            .open(output_file.as_str())
-            .context(here!())?;
+            .open(output_filename)?;
 
-        fileout.write_all(&output_data[..]).context(here!())?
+        // ignore if this failed (etc on a pipe)
+        let _ = fileout.set_len(output_data.len() as u64);
+        fileout.write_all(&output_data[..])?;
+        drop(fileout);
+
+        // what we do is take the lepton output, and see if it recreates the input using the
+        // CPP version of the encoder/decoder
+        if let Some(cpp_path) = cppverify {
+            execute_cpp_verify(cpp_path.as_path(), output_filename, &writable_input_data)?;
+        }
     }
 
     if iterations > 1 {
@@ -311,6 +358,201 @@ fn main_with_result() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// randomly corrupts data if there is a seed
+fn corrupt_data_if_enabled(seed: &mut Option<u64>, input_data: &mut Vec<u8>) {
+    fn simple_lcg(seed: &mut u64) -> u64 {
+        let r = seed.wrapping_mul(6364136223846793005) + 1;
+        *seed = r;
+        r
+    }
+
+    if let Some(seed) = seed {
+        if input_data.len() > 0 {
+            let r = simple_lcg(seed) as usize % input_data.len();
+
+            let bitnumber = simple_lcg(seed) as usize % 8;
+
+            input_data[r] ^= 1 << bitnumber;
+        }
+    }
+}
+
+/// recursively verify all files in a directory, including potentially verifying it with the CPP version of the decoder
+/// to make sure that we didn't break the format in some unexpected way
+fn execute_verify_dir(
+    cpp_executable: &Option<PathBuf>,
+    dir: &Path,
+    enabled_features: &EnabledFeatures,
+    verify: bool,
+    corrupt_data_seed: &mut Option<u64>,
+) -> Result<(), LeptonError> {
+    let entries;
+    match std::fs::read_dir(dir) {
+        Ok(e) => entries = e,
+        Err(e) => {
+            eprintln!("error reading directory {:?} {:?}", dir, e);
+            return Ok(());
+        }
+    }
+
+    for entry in entries {
+        let entry = entry.unwrap();
+        let path = entry.path();
+
+        if path.is_dir() {
+            execute_verify_dir(
+                cpp_executable,
+                &path,
+                enabled_features,
+                verify,
+                corrupt_data_seed,
+            )?;
+            continue;
+        }
+
+        if let Some(x) = path.extension() {
+            if x != "jpg" && x != "jpeg" {
+                continue;
+            }
+
+            let mut file_in;
+            match File::open(&path) {
+                Ok(f) => file_in = f,
+                Err(e) => {
+                    eprintln!("error reading file {:?} {:?}", path, e);
+                    continue;
+                }
+            }
+
+            let mut original_contents = Vec::new();
+            file_in.read_to_end(&mut original_contents).unwrap();
+
+            corrupt_data_if_enabled(corrupt_data_seed, &mut original_contents);
+
+            match do_work(
+                FileType::Jpeg,
+                verify,
+                &original_contents,
+                &enabled_features,
+            ) {
+                Err(e) => {
+                    eprintln!("{:?} error {}", path, e);
+                }
+                Ok((output, _)) => {
+                    if let Some(cpp_executable) = cpp_executable {
+                        // create the input file for the lepton C++ decoder
+                        let verify_output = std::env::temp_dir().join("lepton_jpeg_util_cpp.lep");
+
+                        let mut file_out = File::create(&verify_output).unwrap();
+                        file_out.write_all(&output[..]).unwrap();
+                        drop(file_out);
+
+                        let r = execute_cpp_verify(
+                            cpp_executable,
+                            verify_output.as_os_str(),
+                            &original_contents,
+                        );
+                        let _ = remove_file(verify_output);
+                        if r.is_err() {
+                            eprintln!("{:?} CPP_VERIFY error {:?}", path, r);
+                            if let Some(s) = corrupt_data_seed {
+                                eprintln!("corruption seed was {0}", s);
+                            }
+                            // abort here, this is bad
+                            return r;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_cpp_verify(
+    cpp_executable: &Path,
+    compressed_file: &OsStr,
+    original_contents: &[u8],
+) -> Result<(), LeptonError> {
+    let (output, exit_code, stderr) =
+        call_executable_with_input(cpp_executable, compressed_file).unwrap();
+
+    if exit_code != 0 {
+        log::error!("cpp exit code: {}", exit_code);
+
+        return Err(LeptonError::new(
+            ExitCode::ExternalVerificationFailed,
+            format!(
+                "cpp verify failed with exit code {0} stderr: {1}",
+                exit_code, stderr
+            )
+            .as_str(),
+        ))?;
+    }
+    if output[..].len() != original_contents.len() {
+        return Err(LeptonError::new(
+            ExitCode::ExternalVerificationFailed,
+            format!(
+                "cpp verify failed with different length {0} != {1}",
+                output[..].len(),
+                original_contents.len()
+            )
+            .as_str(),
+        ));
+    }
+    if output[..] != original_contents[..] {
+        return Err(LeptonError::new(
+            ExitCode::ExternalVerificationFailed,
+            "verify failed with different data",
+        )
+        .into());
+    }
+    log::info!("verify succeeded with cpp version");
+    Ok(())
+}
+
+/// does the actual encoding/decoding work
+fn do_work(
+    file_type: FileType,
+    verify: bool,
+    input_data: &[u8],
+    enabled_features: &EnabledFeatures,
+) -> Result<(Vec<u8>, Metrics), LeptonError> {
+    let metrics;
+    let mut output;
+
+    match file_type {
+        FileType::Jpeg => {
+            if verify {
+                (output, metrics) = encode_lepton_verify(input_data, enabled_features)?;
+            } else {
+                let mut reader = Cursor::new(input_data);
+                output = Vec::with_capacity(input_data.len());
+                let mut writer = Cursor::new(&mut output);
+
+                metrics = encode_lepton(&mut reader, &mut writer, enabled_features)?
+            }
+
+            info!(
+                "compressed input {0}, output {1} bytes (compression = {2:.1}%)",
+                input_data.len(),
+                output.len(),
+                ((input_data.len() as f64) / (output.len() as f64) - 1.0) * 100.0
+            );
+        }
+        FileType::Lepton => {
+            let mut reader = Cursor::new(&input_data);
+
+            output = Vec::with_capacity(input_data.len());
+
+            metrics = decode_lepton(&mut reader, &mut output, &enabled_features)?;
+        }
+    }
+
+    Ok((output, metrics))
 }
 
 /// internal debug utility used to figure out where in the output the JPG diverged if there was a coding error writing out the JPG
@@ -368,19 +610,59 @@ impl<W: Write + Seek> Write for VerifyWriter<W> {
 fn main() {
     match main_with_result() {
         Ok(_) => {}
-        Err(e) => match e.root_cause().downcast_ref::<LeptonError>() {
-            // try to extract the exit code if it was a well known error
-            Some(x) => {
-                eprintln!(
-                    "error code: {0} {1} {2}",
-                    x.exit_code, x.exit_code as i32, x.message
-                );
-                std::process::exit(x.exit_code as i32);
-            }
-            None => {
-                eprintln!("unknown error {0:?}", e);
-                std::process::exit(ExitCode::GeneralFailure as i32);
-            }
-        },
+        Err(e) => {
+            eprintln!(
+                "error code: {0} {1} {2}",
+                e.exit_code(),
+                e.exit_code().as_integer_error_code(),
+                e.message()
+            );
+            std::process::exit(e.exit_code().as_integer_error_code());
+        }
     }
+}
+
+/// calls the CPP version of the encoder/decoder to verify the output of the Rust version
+pub fn call_executable_with_input(
+    cpp_executable: &Path,
+    input_filename: &OsStr,
+) -> Result<(Vec<u8>, i32, String), LeptonError> {
+    // temporary file to store the output of the cpp version so we can
+    // compare it with the rust version
+
+    let temp_filename_buf = std::env::temp_dir().join("lepton_jpeg_util_cpp_recreate.jpg");
+    let temp_filename = temp_filename_buf.as_os_str();
+
+    // delete if already exists
+    let _ = std::fs::remove_file(temp_filename);
+
+    log::info!(
+        "verifying input filename with CPP {:?} with {:?}",
+        temp_filename,
+        cpp_executable
+    );
+
+    // Spawn the command
+    let child = Command::new(cpp_executable)
+        .arg(input_filename)
+        .arg(temp_filename)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Wait for the child process to exit and collect output
+    let output = child.wait_with_output()?;
+
+    let mut file_in = File::open(&temp_filename).unwrap();
+    let mut contents = Vec::new();
+    file_in.read_to_end(&mut contents).unwrap();
+
+    // remove the temporary file
+    let _ = std::fs::remove_file(temp_filename);
+
+    // Extract the stdout, stderr, and exit status
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-10000); // Handle the case where exit code is None
+
+    Ok((contents, exit_code, stderr))
 }
